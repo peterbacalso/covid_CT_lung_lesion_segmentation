@@ -1,1 +1,1 @@
-# covid_CT_lung_lesion_segmentation
+# Segmentation Model for Covid 19-20 CT Lung Lesion
