@@ -1,3 +1,14 @@
+playground.ipynb
+test_everything.ipynb
+SampleSubmission/
+
+#
+#
+#
+#
+#
+###### default python gitignore #######
+#
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
