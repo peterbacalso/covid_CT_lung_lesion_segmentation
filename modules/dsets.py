@@ -1,5 +1,8 @@
 import os
+import math
 import glob
+import torch
+import random
 import feather
 import functools
 import numpy as np
@@ -13,8 +16,8 @@ from diskcache import FanoutCache
 from torch.utils.data import Dataset
 
 # local imports
-from util.util import window_image
-from util.logconf import logging
+from modules.util.util import window_image
+from modules.util.logconf import logging
 
 # Load environment variables to get local datasets path
 load_dotenv()
@@ -167,16 +170,12 @@ class Covid2dSegmentationDataset(Dataset):
                 self.index_slices += [(uid, slice_idx) 
                                       for slice_idx in positive_indices]
 
-
-        # self.lesions = pd.read_feather('../df_lesion_coords.fth')
-        # uid_set = set(self.uid_list)
-        # self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
-
         self.context_slice_count = context_slice_count
 
-        log.info(f"{self}: {len(self.uid_list)} uid's, \
-                 {len(self.index_slices)} index slices,
-                 {self.context_slice_count*2+1} slice width")
+        log.info(f"{self.__class__}: {len(self.uid_list)} uid's, " \
+                 + "{}, ".format({None:'general',True:'validation',False:'training'}[is_valid]) \
+                 + f"{len(self.index_slices)} index slices, " \
+                 + f"{self.context_slice_count*2+1} slice width")
         
 
     def __len__(self):
@@ -184,7 +183,7 @@ class Covid2dSegmentationDataset(Dataset):
 
     def __getitem__(self, idx):
         uid, slice_idx = self.index_slices[idx % len(self.index_slices)]
-        return getitem_fullcrop(uid, slice_idx)
+        return self.getitem_fullcrop(uid, slice_idx)
 
     def getitem_fullcrop(self, uid, slice_idx):
         ct = get_ct(uid)
@@ -202,3 +201,76 @@ class Covid2dSegmentationDataset(Dataset):
 
         return hu_slice, mask_slice, uid, slice_idx
 
+class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
+
+    def __init__(self, width_irc, steps_per_epoch=1e4, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.width_irc = width_irc # only be using 66% of this so make the width_irc 1.5 times larger than intended
+        self.steps_per_epoch = steps_per_epoch
+        self.lesions = pd.read_feather('../df_lesion_coords.fth')
+        uid_set = set(self.uid_list)
+        self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
+
+        log.info(f"{self.__class__}: {len(self.lesions)} lesions, " 
+                 + f"{self.width_irc} width irc")
+
+    def __len__(self):
+        return int(self.steps_per_epoch)
+
+    def shuffle_samples(self):
+        self.lesions = self.lesions.sample(frac=1)
+
+    def __getitem__(self, idx):
+        lesion = self.lesions.iloc[idx % len(self.lesions)]
+        return self.getitem_cropslice(lesion)
+
+    def getitem_cropslice(self, lesion):
+        hu_chunk, mask_chunk, center_irc = get_raw_lesion(
+            lesion.uid,
+            tuple(lesion[['coordI', 'coordR', 'coordC']]),
+            self.width_irc)
+
+        mask = mask_chunk[self.context_slice_count:self.context_slice_count+1]
+
+        max_row_offset = int(math.ceil(self.width_irc[1]*.33))
+        max_col_offset = int(math.ceil(self.width_irc[2]*.33))
+        row_offset = random.randrange(0, max_row_offset)
+        col_offset = random.randrange(0, max_col_offset)
+        row_width = self.width_irc[1] - max_row_offset
+        col_width = self.width_irc[2] - max_row_offset
+
+        hu_chunk = torch.from_numpy(hu_chunk[:, row_offset:row_offset+row_width, 
+                col_offset:col_offset+col_width]).to(torch.float32)
+        mask = torch.from_numpy(mask[:, row_offset:row_offset+row_width, 
+                col_offset:col_offset+col_width]).to(torch.float32)
+
+        return hu_chunk, mask, lesion.uid, lesion.coordI
+
+
+class PrepcacheCovidDataset(Dataset):
+    def __init__(self, width_irc, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.width_irc = width_irc
+        self.lesions = pd.read_feather('../df_lesion_coords.fth')
+
+        self.seen_set = set()
+        self.lesions.sort_values(by='uid', inplace=True)
+
+    def __len__(self):
+        return len(self.lesions)
+
+    def __getitem__(self, idx):
+
+        lesion = self.lesions.iloc[idx]
+        get_raw_lesion(lesion.uid, 
+                        tuple(lesion[['coordI', 'coordR', 'coordC']]),
+                        self.width_irc)
+
+        uid = lesion.uid
+        if uid not in self.seen_set:
+            self.seen_set.add(uid)
+            get_ct_index_info(uid)
+
+        return 0, 1 
