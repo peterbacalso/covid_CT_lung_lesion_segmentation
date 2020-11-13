@@ -8,16 +8,25 @@ import nibabel as nib
 
 from pathlib import Path
 from scipy import ndimage
+from dotenv import load_dotenv
 from diskcache import FanoutCache
+from torch.utils.data import Dataset
+
+# local imports
+from util.util import window_image
+from util.logconf import logging
 
 # Load environment variables to get local datasets path
-from dotenv import load_dotenv
 load_dotenv()
 data_dir = os.environ.get('datasets_path')
 dataset_path = Path(f'{data_dir}/COVID-19-20_v2')
 
 raw_cache = FanoutCache('data/cache/raw', shards=64, 
                         timeout=1, size_limit=3e11)
+
+# set logging level
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
 
 class Ct:
 
@@ -34,6 +43,7 @@ class Ct:
 
         self.mask = None
         self.lesions = None
+        self.positive_indices = None
         if len(ct_paths) > 1:
             assert len(ct_paths) <= 2, repr([uid, ct_paths])
             assert 'seg' in ct_paths[1]
@@ -43,6 +53,8 @@ class Ct:
             lesions_dict = get_lesions_dict()
             if uid in lesions_dict:
                 self.lesions = lesions_dict[uid]
+            self.positive_indices = self.mask.sum(axis=(1,2))\
+                                    .nonzero()[0].tolist()
 
 
     def group_lesions(self, output_df=True):
@@ -87,8 +99,6 @@ class Ct:
 
             slice_list.append(slice(start_idx, end_idx))
 
-        print(slice_list)
-
         hu_chunk = self.hu[tuple(slice_list)]
         pos_chunk = self.mask[tuple(slice_list)]
 
@@ -123,7 +133,72 @@ def get_raw_lesion(uid, center_irc, width_irc):
     '''
     return hu_chunk, pos_chunk, center_irc
 
+@raw_cache.memoize(typed=True)
+def get_ct_index_info(uid):
+    ct = get_ct(uid)
+    return int(ct.hu.shape[0]), ct.positive_indices
+
+class Covid2dSegmentationDataset(Dataset):
+
+    def __init__(self, uid=None, is_valid=None, splitter=None, 
+                 is_full_ct=True, window=None, context_slice_count=3):
+
+        if uid:
+            self.uid_list = [uid]
+        else:
+            self.uid_list = sorted(get_lesions_dict().keys())
+
+        if is_valid:
+            assert splitter
+            _, self.uid_list = splitter(self.uid_list)
+        elif splitter:
+            self.uid_list = splitter(self.uid_list)
+
+        self.window = window
+
+        self.index_slices = []
+        for uid in self.uid_list:
+            index_count, positive_indices = get_ct_index_info(uid)
+
+            if is_full_ct: # get entire ct
+                self.index_slices += [(uid, slice_idx) 
+                                      for slice_idx in range(index_count)]
+            else: # get only slices with a lesion present
+                self.index_slices += [(uid, slice_idx) 
+                                      for slice_idx in positive_indices]
 
 
+        # self.lesions = pd.read_feather('../df_lesion_coords.fth')
+        # uid_set = set(self.uid_list)
+        # self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
 
+        self.context_slice_count = context_slice_count
+
+        log.info(f"{self}: {len(self.uid_list)} uid's, \
+                 {len(self.index_slices)} index slices,
+                 {self.context_slice_count*2+1} slice width")
+        
+
+    def __len__(self):
+        return len(self.index_slices)
+
+    def __getitem__(self, idx):
+        uid, slice_idx = self.index_slices[idx % len(self.index_slices)]
+        return getitem_fullcrop(uid, slice_idx)
+
+    def getitem_fullcrop(self, uid, slice_idx):
+        ct = get_ct(uid)
+        hu_slice = torch.zeros((self.context_slice_count*2+1, 512, 512))
+
+        start_idx = slice_idx - self.context_slice_count
+        end_idx = slice_idx + self.context_slice_count + 1
+        for i, context_idx in enumerate(range(start_idx, end_idx)):
+            context_idx = max(context_idx,0)
+            context_idx = min(context_idx, ct.hu.shape[0]-1)
+            hu_slice[i] = torch.from_numpy(ct.hu[context_idx].astype(np.float32))
+        hu_slice = window_image(hu_slice, self.window)
+
+        mask_slice = torch.from_numpy(ct.mask[slice_idx]).unsqueeze(0)
+
+        return hu_slice, mask_slice, uid, slice_idx
 
