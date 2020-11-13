@@ -144,7 +144,7 @@ def get_ct_index_info(uid):
 class Covid2dSegmentationDataset(Dataset):
 
     def __init__(self, uid=None, is_valid=None, splitter=None, 
-                 is_full_ct=True, window=None, context_slice_count=3):
+                 is_full_ct=False, window=None, context_slice_count=3):
 
         if uid:
             self.uid_list = [uid]
@@ -155,7 +155,7 @@ class Covid2dSegmentationDataset(Dataset):
             assert splitter
             _, self.uid_list = splitter(self.uid_list)
         elif splitter:
-            self.uid_list = splitter(self.uid_list)
+            self.uid_list, _ = splitter(self.uid_list)
 
         self.window = window
 
@@ -172,14 +172,21 @@ class Covid2dSegmentationDataset(Dataset):
 
         self.context_slice_count = context_slice_count
 
-        log.info(f"{self.__class__}: {len(self.uid_list)} uid's, " \
-                 + "{}, ".format({None:'general',True:'validation',False:'training'}[is_valid]) \
+        self.lesions = pd.read_feather('../df_lesion_coords.fth')
+        uid_set = set(self.uid_list)
+        self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
+
+        log.info(f"{self.__class__}: " \
+                 + "{} mode, ".format({None:'general',True:'validation',False:'training'}[is_valid]) \
+                 + f"{len(self.uid_list)} uid's, " \
                  + f"{len(self.index_slices)} index slices, " \
-                 + f"{self.context_slice_count*2+1} slice width")
-        
+                 + f"{len(self.lesions)} lesions")
 
     def __len__(self):
         return len(self.index_slices)
+
+    def shuffle(self):
+        random.shuffle(self.index_slices)
 
     def __getitem__(self, idx):
         uid, slice_idx = self.index_slices[idx % len(self.index_slices)]
@@ -203,22 +210,19 @@ class Covid2dSegmentationDataset(Dataset):
 
 class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
-    def __init__(self, width_irc, steps_per_epoch=1e4, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(self, width_irc, steps_per_epoch=1e4, 
+                 is_valid=False, *args, **kwargs):
+        super().__init__(is_valid=is_valid, *args, **kwargs)
 
         self.width_irc = width_irc # only be using 66% of this so make the width_irc 1.5 times larger than intended
-        self.steps_per_epoch = steps_per_epoch
-        self.lesions = pd.read_feather('../df_lesion_coords.fth')
-        uid_set = set(self.uid_list)
-        self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
+        self.steps_per_epoch = int(steps_per_epoch)
 
-        log.info(f"{self.__class__}: {len(self.lesions)} lesions, " 
-                 + f"{self.width_irc} width irc")
+        log.info(f"{self.__class__}: {self.width_irc} width_irc")
 
     def __len__(self):
-        return int(self.steps_per_epoch)
+        return self.steps_per_epoch
 
-    def shuffle_samples(self):
+    def shuffle(self):
         self.lesions = self.lesions.sample(frac=1)
 
     def __getitem__(self, idx):

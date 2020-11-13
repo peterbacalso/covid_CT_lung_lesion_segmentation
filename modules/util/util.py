@@ -2,6 +2,9 @@ from collections import namedtuple
 
 WindowTuple = namedtuple('WindowInfo', ['width', 'level'])
 
+lung_window = WindowTuple(1500, -600)
+mediastinal_window = WindowTuple(350, 50)
+
 def window_image(img, window, img_type='tensor'):
     if window is not None:
         img_min = window.level - window.width//2
@@ -13,23 +16,29 @@ def window_image(img, window, img_type='tensor'):
         return img.clamp(img_min, img_max)
     return img.clip(img_min, img_max)
 
-'''
-import numpy as np
+def list_stride_splitter(array, val_stride):
+    assert val_stride > 0, val_stride
+    return [item for i, item in enumerate(array) if i % val_stride > 0], array[::val_stride]
 
-XYZTuple = namedtuple('XYZTuple', ['x', 'y', 'z'])
+def importstr(module_str, from_=None):
+    """
+    >>> importstr('os')
+    <module 'os' from '.../os.pyc'>
+    >>> importstr('math', 'fabs')
+    <built-in function fabs>
+    """
+    if from_ is None and ':' in module_str:
+        module_str, from_ = module_str.rsplit(':')
 
-def irc2xyz(irc, affine):
-    linear_transform = affine[:3, :3]
-    offset = affine[:3, 3]
-    xyz = linear_transform.dot(irc) + offset
-    return XYZTuple(*xyz)
+    module = __import__(module_str)
+    for sub_str in module_str.split('.')[1:]:
+        module = getattr(module, sub_str)
 
+    if from_:
+        try:
+            return getattr(module, from_)
+        except:
+            raise ImportError('{}.{}'.format(module_str, from_))
+    return module
 
-def xyz2irc(xyz, affine):
-    affine_inverse = np.linalg.inv(affine)
-    linear_transform = affine_inverse[:3, :3]
-    offset = affine_inverse[:3, 3]
-    irc = linear_transform.dot(xyz) + offset
-    return IRCTuple(*irc)
-'''
 
