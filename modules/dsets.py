@@ -173,6 +173,7 @@ class Covid2dSegmentationDataset(Dataset):
         self.context_slice_count = context_slice_count
 
         self.lesions = pd.read_feather('../df_lesion_coords.fth')
+        self.lesions.sort_values(by='uid',inplace=True)
         uid_set = set(self.uid_list)
         self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
 
