@@ -4,6 +4,7 @@ SampleSubmission/
 *.swp
 data/
 saved-models/
+wandb/
 
 #
 #

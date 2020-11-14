@@ -30,8 +30,7 @@ class CovidPrepCacheApp:
         parser.add_argument('--width-irc',
             nargs='+',
             help='Pass 3 values: Index, Row, Column',
-            default=None,
-            required=True
+            default=[7,60,60]
         )
 
         self.cli_args = parser.parse_args(sys_argv)

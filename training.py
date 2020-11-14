@@ -3,7 +3,9 @@ import torch
 import wandb
 import shutil
 import hashlib
+import datetime
 import argparse
+import numpy as np
 
 from pathlib import Path
 from functools import partial
@@ -15,12 +17,12 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 
 # local imports
-from module.models import UNetWrapper
+from modules.model import UNetWrapper
 from modules.util.logconf import logging
-from module.util.util import list_stride_splitter
-from module.util.augmentation import SegmentationAugmentation
-from module.dsets import TrainingCovid2dSegmentationDataset, 
-                          Covid2dSegmentationDataset, get_ct
+from modules.util.util import list_stride_splitter
+from modules.util.augmentation import SegmentationAugmentation
+from modules.dsets import (TrainingCovid2dSegmentationDataset, 
+                          Covid2dSegmentationDataset, get_ct)
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -58,9 +60,15 @@ class CovidSegmentationTrainingApp:
             type=int
         )
         parser.add_argument(
-            '--val-stride',
-            help='Run validation at every val-stride-th epoch. Validation is always run at epoch 1',
-            default=5,
+            '--val-cadence',
+            help='Run validation at every val-cadence-th epoch. Validation will always run at epoch 1',
+            default=1,
+            type=int
+        )
+        parser.add_argument(
+            '--recall-priority',
+            help=' Prioritize recall over precision by (int) times more',
+            default=0,
             type=int
         )
         parser.add_argument(
@@ -114,8 +122,7 @@ class CovidSegmentationTrainingApp:
         parser.add_argument('--width-irc',
             nargs='+',
             help='Pass 3 values: Index, Row, Column',
-            default=None,
-            required=True
+            default=[7,60,60]
         )
         parser.add_argument(
             '--ct-window',
@@ -126,6 +133,10 @@ class CovidSegmentationTrainingApp:
 
         self.cli_args = parser.parse_args(argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
+
+        if self.cli_args.epochs == 0:
+            wandb.init(project="covid19_seg", name=self.cli_args.run_name)
+            raise
 
         assert self.cli_args.pad_type in ('zero', 'reflect', 'replicate'), repr(self.cli_args.pad_type)
         if self.cli_args.ct_window is not None:
@@ -146,6 +157,7 @@ class CovidSegmentationTrainingApp:
         if self.cli_args.augmented or self.cli_args.augment_noise:
             self.augmentation_dict['noise'] = 25.0
 
+        self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
         self.seg_model, self.aug_model = self.init_model()
         self.optim = self.init_optim()
         self.window = self.cli_args.ct_window
@@ -225,12 +237,9 @@ class CovidSegmentationTrainingApp:
         return train_dl, valid_dl
 
     def init_scheduler(self):
-        # janky solution for finishing wandb run in jupyter
-        epochs = 1 if self.cli_args.epochs == 0 else self.cli_args.epochs 
-
         return OneCycleLR(self.optim, max_lr=3e-1,
                           steps_per_epoch=len(self.train_dl),
-                          epochs=epochs)
+                          epochs=self.cli_args.epochs)
 
     def batch_loss(self, idx, batch, batch_size, metrics, thresh=.5):
         hu, mask, uid_list, slice_idx_list = batch
@@ -243,18 +252,19 @@ class CovidSegmentationTrainingApp:
 
         pred_g = self.seg_model(hu_g)
 
-        dice_loss = self.loss_func(prediction_g, mask_g)
-        fine_loss = self.loss_func(prediction_g*mask_g, mask_g)
+        dice_loss = self.loss_func(pred_g, mask_g)
+        fine_loss = self.loss_func(pred_g*mask_g, mask_g)
 
         start_idx = idx * batch_size
         end_idx = start_idx + batch_size
 
         with torch.no_grad():
-            pred_bool = (pred_g > thresh).to(torch.float32)
+            pred_bool = pred_g > thresh
+            mask_bool = mask_g > thresh
 
-            tp = (pred_bool * mask_g).sum(dim=[1,2,3])
-            fn = (~pred_bool * mask_g).sum(dim=[1,2,3])
-            fp = (pred_bool * ~mask_g).sum(dim=[1,2,3])
+            tp = (pred_bool * mask_bool).sum(dim=[1,2,3])
+            fn = (~pred_bool * mask_bool).sum(dim=[1,2,3])
+            fp = (pred_bool * ~mask_bool).sum(dim=[1,2,3])
 
             metrics[METRICS_LOSS_IDX, start_idx:end_idx] = dice_loss
             metrics[METRICS_TP_IDX, start_idx:end_idx] = tp 
@@ -262,8 +272,8 @@ class CovidSegmentationTrainingApp:
             metrics[METRICS_FP_IDX, start_idx:end_idx] = fp 
 
         # we want to maximize recall so we give the false negatives 
-        # a larger impact on the loss (8 times more)
-        return dice_loss.mean() + fine_loss.mean() * 8
+        # a larger impact on the loss (recall_priority times more)
+        return dice_loss.mean() + (fine_loss.mean() * self.cli_args.recall_priority)
 
 
     def one_epoch(self, epoch, dl, mb, train=True):
@@ -311,10 +321,10 @@ class CovidSegmentationTrainingApp:
             sum_a[METRICS_FP_IDX] / (mask_voxel_count or 1)
 
         precision = metrics_dict[f'pr_{mode_str}/precision'] = \
-            sum_a[METRICS_TP_IDX_SEG] \
-            / ((sum_a[METRICS_TP_IDX_SEG] + sum_a[METRICS_FP_IDX_SEG]) or 1)
+            sum_a[METRICS_TP_IDX] \
+            / ((sum_a[METRICS_TP_IDX] + sum_a[METRICS_FP_IDX]) or 1)
         recall = metrics_dict[f'pr_{mode_str}/recall'] = \
-            sum_a[METRICS_TP_IDX_SEG] / (mask_voxel_count or 1)
+            sum_a[METRICS_TP_IDX] / (mask_voxel_count or 1)
 
         metrics_dict[f'pr_{mode_str}/f1_score'] = \
             2 * (precision * recall) / ((precision + recall) or 1)
@@ -324,8 +334,8 @@ class CovidSegmentationTrainingApp:
                       + "{loss/trn:.4f} loss, "
                       + "{pr_trn/precision:.4f} precision, "
                       + "{pr_trn/recall:.4f} recall, "
-                      + "{pr_trn/f1_score:.4f} f1 score"
-                      + "{metrics_trn/miss_rate:.4f} miss rate"
+                      + "{pr_trn/f1_score:.4f} f1 score "
+                      + "{metrics_trn/miss_rate:.4f} miss rate "
                       + "{metrics_trn/fp_to_mask_ratio:.4f} fp to label ratio"
             ).format(epoch, mode_str, **metrics_dict))
         else:
@@ -333,8 +343,8 @@ class CovidSegmentationTrainingApp:
                       + "{loss/val:.4f} loss, "
                       + "{pr_val/precision:.4f} precision, "
                       + "{pr_val/recall:.4f} recall, "
-                      + "{pr_val/f1_score:.4f} f1 score"
-                      + "{metrics_val/miss_rate:.4f} miss rate"
+                      + "{pr_val/f1_score:.4f} f1 score "
+                      + "{metrics_val/miss_rate:.4f} miss rate "
                       + "{metrics_val/fp_to_mask_ratio:.4f} fp to label ratio"
             ).format(epoch, mode_str, **metrics_dict))
 
@@ -374,11 +384,10 @@ class CovidSegmentationTrainingApp:
                 else:
                     hu_slice = hu[dl.dataset.context_slice_count].numpy()
 
-                mask_data = np.zeros_like(pred_bool.squeeze())
-                mask_data += pred_bool & mask_bool # true positives
+                mask_data = np.zeros_like(pred_bool.squeeze()).astype(np.int)
+                mask_data += 1 * pred_bool & mask_bool # true positives
                 mask_data += 2 * (~pred_bool & mask_bool) # false negatives 
                 mask_data += 3 * (pred_bool & ~mask_bool) # false positives
-                mask_data = mask_data.astype(np.int)
 
                 class_labels = {
                     1: "True Positive",
@@ -386,12 +395,13 @@ class CovidSegmentationTrainingApp:
                     3: "False Positive"
                 }
 
-                truth_mask = np.zeros_like(pred_bool.unsqueeze())
+                truth_mask = np.zeros_like(mask_bool)
                 truth_mask += mask_bool # ground truth
+                truth_mask = ~truth_mask
                 truth_mask = truth_mask.astype(np.int)
-                truth_labels = {1: "Lesion"}
+                truth_labels = {0: "Lesion"}
 
-                image = hu_slice.squeeze().unsqueeze(-1)
+                image = np.expand_dims(hu_slice.squeeze(), axis=-1)
                 mask_img = wandb.Image(image, masks={
                   "predictions": {
                       "mask_data": mask_data,
@@ -407,9 +417,10 @@ class CovidSegmentationTrainingApp:
                   step=self.total_training_samples_count)
 
     def save_model(self, epoch, is_best=False):
-        file_path = Path(f'/saved-models/{self.time_str}.\
-             {self.total_training_samples_count}.state')
-        file_path.mkdir(parents=True, exist_ok=True)
+        folder_path = Path(f'saved-models/')
+        folder_path.mkdir(parents=True, exist_ok=True)
+        file_path = folder_path/f'{self.time_str}.{self.total_training_samples_count}.state'
+        
 
         model = self.seg_model
         if isinstance(model, nn.DataParallel):
@@ -430,9 +441,9 @@ class CovidSegmentationTrainingApp:
         log.info(f'Saved model params to {file_path}')
 
         if is_best:
-            best_path = Path(f'/saved-models/{self.time_str}.best.state')
+            best_path = Path(f'saved-models/{self.time_str}.best.state')
             shutil.copy(file_path, best_path)
-            log.info(f'Saved model params to {file_path}')
+            log.info(f'Saved model params to {best_path}')
 
         # output sha1 of model saved 
         # this can help with debugging if file names get mixed up
@@ -456,18 +467,18 @@ class CovidSegmentationTrainingApp:
                   'pr_val/precision', 'pr_val/recall', 'pr_val/f1_score'], 
                  table=True)
         for epoch in mb:
-            train_metrics = self.one_epoch(epoch, dl=self.train_dl, mb=mb)
-            train_metrics_dict = self.log_metrics(epoch, mode_str='train',
-                                                  metrics=train_metrics)
-            if epoch == 1 or epoch % self.val_stride == 0:
+            trn_metrics = self.one_epoch(epoch, dl=self.train_dl, mb=mb)
+            trn_metrics_dict = self.log_metrics(epoch, mode_str='trn',
+                                                  metrics=trn_metrics)
+            if epoch == 1 or epoch % self.cli_args.val_cadence== 0:
                 val_metrics = self.one_epoch(epoch, dl=self.valid_dl, 
                                              mb=mb, train=False)
                 val_metrics_dict = self.log_metrics(epoch, mode_str='val',
                                                     metrics=val_metrics)
                 self.log_images(epoch, mode_str='trn', dl=self.train_dl)
                 self.log_images(epoch, mode_str='val', dl=self.valid_dl)
-                best_score = max(best_score, val_metrics_dict['pr_val/recall'])
-                self.save_model(epoch, val_metrics_dict['pr_val/recall']==best_score)
+                best_score = max(best_score, val_metrics_dict['pr_val/f1_score'])
+                self.save_model(epoch, val_metrics_dict['pr_val/f1_score']==best_score)
                 mb.write([
                     epoch,
                     "{:.4f}".format(trn_metrics_dict['loss/trn']),
@@ -480,6 +491,7 @@ class CovidSegmentationTrainingApp:
                 ], table=True)
 
 
- 
+if __name__=='__main__':
+    CovidSegmentationTrainingApp().main()
 
 
