@@ -110,7 +110,7 @@ class Ct:
 
 @functools.lru_cache(1)
 def get_lesions_dict():
-    df_lesions = pd.read_feather('../df_lesion_coords.fth')
+    df_lesions = pd.read_feather('df_lesion_coords.fth')
     lesions_dict = {}
 
     for _, lesion in df_lesions.iterrows():
@@ -172,12 +172,12 @@ class Covid2dSegmentationDataset(Dataset):
 
         self.context_slice_count = context_slice_count
 
-        self.lesions = pd.read_feather('../df_lesion_coords.fth')
+        self.lesions = pd.read_feather('df_lesion_coords.fth')
         self.lesions.sort_values(by='uid',inplace=True)
         uid_set = set(self.uid_list)
         self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
 
-        log.info(f"{self.__class__}: " \
+        log.info(f"{type(self).__name__}: " \
                  + "{} mode, ".format({None:'general',True:'validation',False:'training'}[is_valid]) \
                  + f"{len(self.uid_list)} uid's, " \
                  + f"{len(self.index_slices)} index slices, " \
@@ -218,7 +218,7 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         self.width_irc = width_irc # only be using 66% of this so make the width_irc 1.5 times larger than intended
         self.steps_per_epoch = int(steps_per_epoch)
 
-        log.info(f"{self.__class__}: {self.width_irc} width_irc")
+        log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
 
     def __len__(self):
         return self.steps_per_epoch
@@ -258,7 +258,7 @@ class PrepcacheCovidDataset(Dataset):
         super().__init__(*args, **kwargs)
 
         self.width_irc = width_irc
-        self.lesions = pd.read_feather('../df_lesion_coords.fth')
+        self.lesions = pd.read_feather('df_lesion_coords.fth')
 
         self.seen_set = set()
         self.lesions.sort_values(by='uid', inplace=True)
