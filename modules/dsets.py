@@ -139,14 +139,6 @@ def get_ct(uid):
 def get_raw_lesion(uid, center_irc, width_irc): 
     ct = get_ct(uid)
     hu_chunk, pos_chunk, center_irc = ct.get_raw_lesion(center_irc, width_irc)
-    '''
-    if window is None:
-        hu_chunk.clip(-1000,1000,hu_chunk)
-    else:
-        hu_min = window.level - window.width//2
-        hu_max = window.center + window.width//2
-        hu_chunk.clip(hu_min,hu_max,hu_chunk)
-    '''
     return hu_chunk, pos_chunk, center_irc
 
 @raw_cache.memoize(typed=True)
@@ -204,9 +196,9 @@ class Covid2dSegmentationDataset(Dataset):
 
     def __getitem__(self, idx):
         uid, slice_idx = self.index_slices[idx % len(self.index_slices)]
-        return self.getitem_fullcrop(uid, slice_idx)
+        return self.getitem_fullslice(uid, slice_idx)
 
-    def getitem_fullcrop(self, uid, slice_idx):
+    def getitem_fullslice(self, uid, slice_idx):
         ct = get_ct(uid)
         hu_slice = torch.zeros((self.context_slice_count*2+1, 512, 512))
 
@@ -260,6 +252,8 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
         hu_chunk = torch.from_numpy(hu_chunk[:, row_offset:row_offset+row_width, 
                 col_offset:col_offset+col_width]).to(torch.float32)
+        hu_chunk = window_image(hu_chunk, self.window)
+
         mask = torch.from_numpy(mask[:, row_offset:row_offset+row_width, 
                 col_offset:col_offset+col_width]).to(torch.float32)
 

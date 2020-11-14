@@ -3,6 +3,7 @@ test_everything.ipynb
 SampleSubmission/
 *.swp
 data/
+saved-models/
 
 #
 #
