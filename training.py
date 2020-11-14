@@ -1,8 +1,10 @@
 import sys
 import torch
+import wandb
 import argparse
 
 from functools import partial
+from fastprogress.fastprogress import master_bar, progress_bar
 
 from torch import nn
 from torch.optim import SGD
@@ -18,6 +20,12 @@ from module.dsets import TrainingCovid2dSegmentationDataset, Covid2dSegmentation
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
+
+METRICS_SIZE = 4
+METRICS_LOSS_IDX = 0
+METRICS_TP_IDX = 1
+METRICS_FN_IDX = 2
+METRICS_FP_IDX = 3
 
 class CovidSegmentationTrainingApp:
 
@@ -209,8 +217,157 @@ class CovidSegmentationTrainingApp:
                           steps_per_epoch=len(self.train_dl),
                           epochs=epochs)
 
-    def main(self):
+    def batch_loss(self, idx, batch, batch_size, metrics, thresh=.5):
+        input_t, label_t, uid_list, slice_idx_list = batch
+
+        input_g = input_t.to(self.device, non_blocking=True)
+        label_g = label_t.to(self.device, non_blocking=True)
+
+        if self.seg_model.training and self.augmentation_dict:
+            input_g, label_g = self.aug_model(input_g, label_g)
+
+        pred_g = self.seg_model(input_g)
+
+        dice_loss = self.loss_func(prediction_g, label_g)
+        fine_loss = self.loss_func(prediction_g*label_g, label_g)
+
+        start_idx = idx * batch_size
+        end_idx = start_idx + batch_size
+
+        with torch.no_grad():
+            pred_bool = (pred_g > thresh).to(torch.float32)
+
+            tp = (pred_bool * label_g).sum(dim=[1,2,3])
+            fn = (~pred_bool * label_g).sum(dim=[1,2,3])
+            fp = (pred_bool * ~label_g).sum(dim=[1,2,3])
+
+            metrics[METRICS_LOSS_IDX, start_idx:end_idx] = dice_loss
+            metrics[METRICS_TP_IDX, start_idx:end_idx] = tp 
+            metrics[METRICS_FN_IDX, start_idx:end_idx] = fn
+            metrics[METRICS_FP_IDX, start_idx:end_idx] = fp 
+
+        # we want to maximize recall so we give the false negatives 
+        # a larger impact on the loss (8 times more)
+        return dice_loss.mean() + fine_loss.mean() * 8
+
+
+    def one_epoch(self, epoch, dl, mb, train=True):
+        if train:
+            self.seg_model.train()
+            dl.dataset.shuffle()
+            self.total_training_samples_count += len(dl.dataset)
+        else:
+            self.seg_model.eval()
+
+        metrics = torch.zeros(METRICS_SIZE, len(dl.dataset), device=self.device)
+
+        pb = progress_bar(enumerate(dl), total=len(dl), parent=mb)
+        for i, batch in pb:
+            if train:
+                self.optim.zero_grad()
+                loss = self.batch_loss(i, batch, dl.batch_size, metrics)
+                loss.backward()
+                self.optim.step()
+                self.scheduler.step()
+            else:
+                with torch.no_grad():
+                    self.batch_loss(i, batch, dl.batch_size, metrics)
+
+        return metrics.to('cpu')
+
+    def log_metrics(self, epoch, mode_str, metrics):
+        log.info("E{} {}".format(
+            epoch,
+            type(self).__name__,
+        ))
+
+        metrics_a = metrics.detach().numpy()
+        sum_a = metrics_a.sum(axis=1)
+        assert np.isfinite(metrics_a).all()
+
+        all_label_count = sum_a[METRICS_TP_IDX] + sum_a[METRICS_FN_IDX]
+
+        metrics_dict = {}
+        metrics_dict[f'loss/{mode_str}'] = metrics_a[METRICS_LOSS_IDX].mean()
+
+        metrics_dict[f'metrics_{mode_str}/miss_rate'] = \
+            sum_a[METRICS_FN_IDX] / (all_label_count or 1)
+        metrics_dict[f'metrics_{mode_str}/fp_to_label_ratio'] = \
+            sum_a[METRICS_FP_IDX] / (all_label_count or 1)
+
+        precision = metrics_dict[f'pr_{mode_str}/precision'] = \
+            sum_a[METRICS_TP_IDX_SEG] \
+            / ((sum_a[METRICS_TP_IDX_SEG] + sum_a[METRICS_FP_IDX_SEG]) or 1)
+        recall = metrics_dict[f'pr_{mode_str}/recall'] = \
+            sum_a[METRICS_TP_IDX_SEG] / (all_label_count or 1)
+
+        metrics_dict[f'pr_{mode_str}/f1_score'] = \
+            2 * (precision * recall) / ((precision + recall) or 1)
+
+        if mode_str=='trn':
+            log.info(("E{} {:8} "
+                      + "{loss/trn:.4f} loss, "
+                      + "{pr_trn/precision:.4f} precision, "
+                      + "{pr_trn/recall:.4f} recall, "
+                      + "{pr_trn/f1_score:.4f} f1 score"
+                      + "{metrics_trn/miss_rate:.4f} miss rate"
+                      + "{metrics_trn/fp_to_label_ratio:.4f} fp to label ratio"
+            ).format(epoch, mode_str, **metrics_dict))
+        else:
+            log.info(("E{} {:8} "
+                      + "{loss/val:.4f} loss, "
+                      + "{pr_val/precision:.4f} precision, "
+                      + "{pr_val/recall:.4f} recall, "
+                      + "{pr_val/f1_score:.4f} f1 score"
+                      + "{metrics_val/miss_rate:.4f} miss rate"
+                      + "{metrics_val/fp_to_label_ratio:.4f} fp to label ratio"
+            ).format(epoch, mode_str, **metrics_dict))
+
+        wandb.log(metrics_dict, step=self.total_training_samples_count)
+
+        return metrics_dict
+
+    def log_images(self):
         pass
+
+    def save_model(self):
+        pass
+
+    def main(self):
+        if self.cli_args.run_name is None:
+            wandb.init(project="covid19_seg")
+        else:
+            wandb.init(project="covid19_seg", name=self.cli_args.run_name)
+        log.info(f"Starting {type(self).__name__}, {self.cli_args}")
+        best_score = 0.
+        mb = master_bar(range(1, self.cli_args.epochs+1))
+        mb.write(['epoch', 'loss/trn', 'loss/val',
+                  'metrics_val/miss_rate', 'metrics_val/fp_to_label_ratio',
+                  'pr_val/precision', 'pr_val/recall', 'pr_val/f1_score'], 
+                 table=True)
+        for epoch in mb:
+            train_metrics = self.one_epoch(epoch, dl=self.train_dl, mb=mb)
+            train_metrics_dict = self.log_metrics(epoch, mode_str='train',
+                                                  metrics=train_metrics)
+            if epoch == 1 or epoch % self.val_stride == 0:
+                val_metrics = self.one_epoch(epoch, dl=self.valid_dl, 
+                                             mb=mb, train=False)
+                val_metrics_dict = self.log_metrics(epoch, mode_str='val',
+                                                    metrics=val_metrics)
+                # self.log_images(epoch, mode_str='val', dl=self.valid_dl)
+                best_score = max(best_score, val_metrics_dict['pr_val/recall'])
+                # self.save_model(epoch, val_metrics_dict['pr_val/recall']==best_score)
+                mb.write([
+                    epoch,
+                    "{:.4f}".format(trn_metrics_dict['loss/trn']),
+                    "{:.4f}".format(val_metrics_dict['loss/val']),
+                    "{:.4f}".format(val_metrics_dict['pr_val/precision']),
+                    "{:.4f}".format(val_metrics_dict['pr_val/recall']),
+                    "{:.4f}".format(val_metrics_dict['pr_val/f1_score']),
+                    "{:.4f}".format(val_metrics_dict['metrics_val/miss_rate']),
+                    "{:.4f}".format(val_metrics_dict['metrics_val/fp_to_label_ratio'])
+                ], table=True)
+
 
  
 
