@@ -14,6 +14,7 @@ from scipy import ndimage
 from dotenv import load_dotenv
 from diskcache import FanoutCache
 from torch.utils.data import Dataset
+from skimage.measure import regionprops
 
 # local imports
 from modules.util.util import window_image
@@ -64,19 +65,31 @@ class Ct:
         # get rid of tiny lesions by using morphology erosion
         clean_mask = ndimage.binary_erosion(self.mask)
         # group blobs that are together
-        lesion_label_a, lesion_count = ndimage.label(clean_mask) 
+        lesion_labels, lesion_count = ndimage.label(clean_mask) 
+        properties = regionprops(lesion_labels)
+
         center_irc_list = ndimage.center_of_mass(
             self.hu.clip(-1000,1000) + 1001, # function needs +'ve input
-            labels = lesion_label_a,
+            labels = lesion_labels,
             index=np.arange(1,lesion_count+1))
-        lesion_cols = ['uid', 'coordI', 'coordR', 'coordC']
+        lesion_cols = ['uid', 'coordI', 'coordR', 'coordC', 
+                       'min_index', 'max_index', 'min_row', 'max_row', 
+                       'min_column', 'max_column', 'largest_side_px']
         lesions = []
+
+        assert len(properties) == len(center_irc_list), repr([len(properties), len(center_irc_list)])
+        zip_iter = zip(center_irc_list, properties)
         # center_of_mass will produce floating point values so we round
-        for i, center_irc in enumerate(center_irc_list):
+        for i, (center_irc, p) in enumerate(zip_iter):
+            min_i, min_r, min_c, max_i, max_r, max_c = p.bbox
+            largest_side = max(max_c-min_c, max_r-min_r, max_c-min_c)
             lesions.append([self.uid, 
                             int(round(center_irc[0])), 
                             int(round(center_irc[1])), 
-                            int(round(center_irc[2]))])
+                            int(round(center_irc[2])),
+                            min_i, max_i, min_r,
+                            max_r, min_c, max_c,
+                            largest_side])
 
         return lesions if not output_df \
             else pd.DataFrame(lesions, columns=lesion_cols)
