@@ -2,7 +2,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from util.unet import UNet
+from modules.util.unet import UNet
 
 
 class UNetWrapper(nn.Module):
