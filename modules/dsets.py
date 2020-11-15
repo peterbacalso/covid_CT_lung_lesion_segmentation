@@ -213,7 +213,10 @@ class Covid2dSegmentationDataset(Dataset):
             hu_slice[i] = torch.from_numpy(ct.hu[context_idx].astype(np.float32))
         hu_slice = window_image(hu_slice, self.window)
 
-        mask_slice = torch.from_numpy(ct.mask[slice_idx]).unsqueeze(0)
+        if ct.mask is not None:
+            mask_slice = torch.from_numpy(ct.mask[slice_idx]).unsqueeze(0)
+        else:
+            mask_slice = torch.zeros_like(hu_slice).unsqueeze(0)
 
         return hu_slice, mask_slice, uid, slice_idx
 

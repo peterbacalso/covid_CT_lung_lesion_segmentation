@@ -2,7 +2,9 @@ import sys
 import torch
 import argparse
 import numpy as np
+import nibabel as nib
 
+from pathlib import Path
 from scipy import ndimage
 
 from torch import nn
@@ -10,7 +12,13 @@ from torch.utils.data import DataLoader
 
 # local imports
 from modules.model import UNetWrapper
-from modules.dsets import Covid2dSegmentationDataset 
+from modules.util.logconf import logging
+from modules.dsets import Covid2dSegmentationDataset, get_ct
+
+log = logging.getLogger(__name__)
+log.setLevel(logging.INFO)
+
+Path.ls = lambda x: [o.name for o in x.iterdir()]
 
 class CovidInferenceApp:
 
@@ -114,16 +122,35 @@ class CovidInferenceApp:
                     output[slice_idx] = pred[i].cpu().numpy()
 
             mask = output > .5
-            eroded_mask = ndimage.binary_erosion(mask)
+            #eroded_mask = ndimage.binary_erosion(mask)
 
-        return mask, eroded_mask
+        return mask
 
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
 
+        output_folder_path= Path(f'submission/')
+        output_folder_path.mkdir(parents=True, exist_ok=True)
+
         if self.cli_args.uid:
             uid_set = set(self.cli_args.uid.split(','))
+        elif self.run_all:
+            dataset_path = Path(self.cli_args.data_path)
+            file_list = dataset_path.ls()
+            uid_list = [fname[18:23] if len(fname) > 31 else fname[18:21] \
+                        for fname in file_list]
+            uid_set = set(uid_list)
+
         for uid in uid_set:
-            ct_paths = sorted(glob.glob(f'{str(dataset_path)}/*/*-0{uid}_*.nii.gz'))
+            ct = get_ct(uid, self.cli_args.data_path)
+            mask = self.segment_ct(ct, uid)
+            mask = mask.astype(np.float64)
+            nifti_mask = nib.Nifti1Image(mask.T, affine=ct.affine)
+            nib.save(nifti_mask, output_folder_path/f'{uid}.nii.gz')
+
+if __name__=='__main__':
+    CovidInferenceApp().main()
+
+
 
 
