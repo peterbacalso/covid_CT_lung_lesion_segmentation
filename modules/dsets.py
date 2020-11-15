@@ -17,7 +17,7 @@ from torch.utils.data import Dataset
 from skimage.measure import regionprops
 
 # local imports
-from modules.util.util import window_image
+from modules.util.util import window_image, normalize_image
 from modules.util.logconf import logging
 
 # Load environment variables to get local datasets path
@@ -212,6 +212,7 @@ class Covid2dSegmentationDataset(Dataset):
             context_idx = min(context_idx, ct.hu.shape[0]-1)
             hu_slice[i] = torch.from_numpy(ct.hu[context_idx].astype(np.float32))
         hu_slice = window_image(hu_slice, self.window)
+        hu_slice = normalize_image(hu_slice, self.window)
 
         if ct.mask is not None:
             mask_slice = torch.from_numpy(ct.mask[slice_idx]).unsqueeze(0)
@@ -259,6 +260,7 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         hu_chunk = torch.from_numpy(hu_chunk[:, row_offset:row_offset+row_width, 
                 col_offset:col_offset+col_width]).to(torch.float32)
         hu_chunk = window_image(hu_chunk, self.window)
+        hu_chunk = normalize_image(hu_chunk, self.window)
 
         mask = torch.from_numpy(mask[:, row_offset:row_offset+row_width, 
                 col_offset:col_offset+col_width]).to(torch.float32)
