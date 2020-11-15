@@ -134,7 +134,7 @@ class CovidInferenceApp:
 
         if self.cli_args.uid:
             uid_set = set(self.cli_args.uid.split(','))
-        elif self.run_all:
+        elif self.cli_args.run_all:
             dataset_path = Path(self.cli_args.data_path)
             file_list = dataset_path.ls()
             uid_list = [fname[18:23] if len(fname) > 31 else fname[18:21] \
