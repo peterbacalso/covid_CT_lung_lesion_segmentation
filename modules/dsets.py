@@ -23,7 +23,7 @@ from modules.util.logconf import logging
 # Load environment variables to get local datasets path
 load_dotenv()
 data_dir = os.environ.get('datasets_path')
-dataset_path = Path(f'{data_dir}/COVID-19-20_v2')
+local_dataset_path = Path(f'{data_dir}/COVID-19-20_v2')
 
 raw_cache = FanoutCache('data/cache/raw', shards=64, 
                         timeout=1, size_limit=3e11)
@@ -34,10 +34,13 @@ log.setLevel(logging.INFO)
 
 class Ct:
 
-    def __init__(self, uid):
+    def __init__(self, uid, dataset_path=None):
         self.uid = uid
 
-        ct_paths = sorted(glob.glob(f'{str(dataset_path)}/*/*-0{uid}_*.nii.gz'))
+        if dataset_path is None:
+            ct_paths = sorted(glob.glob(f'{str(local_dataset_path)}/*/*-0{uid}_*.nii.gz'))
+        else:
+            ct_paths = sorted(glob.glob(f'{str(dataset_path)}/*-0{uid}_*.nii.gz'))
         assert len(ct_paths) > 0, repr(f'No CT found for given uid {uid}')
         assert 'ct' in ct_paths[0]
 
@@ -132,8 +135,8 @@ def get_lesions_dict():
     return lesions_dict 
 
 @functools.lru_cache(1, typed=True)
-def get_ct(uid):
-    return Ct(uid)
+def get_ct(uid, dataset_path=None):
+    return Ct(uid, dataset_path)
 
 @raw_cache.memoize(typed=True)
 def get_raw_lesion(uid, center_irc, width_irc): 

@@ -54,6 +54,12 @@ class CovidSegmentationTrainingApp:
             type=int
         )
         parser.add_argument(
+            '--steps-per-epoch',
+            help='Length of dataset',
+            default=1e4,
+            type=int
+        )
+        parser.add_argument(
             '--epochs',
             help='Total iterations to feed the entire dataset to the model',
             default=1,
@@ -67,8 +73,14 @@ class CovidSegmentationTrainingApp:
         )
         parser.add_argument(
             '--recall-priority',
-            help=' Prioritize recall over precision by (int) times more',
+            help='Prioritize recall over precision by (int) times more',
             default=0,
+            type=int
+        )
+        parser.add_argument(
+            '--depth',
+            help='UNet Depth',
+            default=3,
             type=int
         )
         parser.add_argument(
@@ -149,7 +161,7 @@ class CovidSegmentationTrainingApp:
         if self.cli_args.augmented or self.cli_args.augment_flip:
             self.augmentation_dict['flip'] = True
         if self.cli_args.augmented or self.cli_args.augment_offset:
-            self.augmentation_dict['offset'] = .1
+            self.augmentation_dict['offset'] = .3
         if self.cli_args.augmented or self.cli_args.augment_scale:
             self.augmentation_dict['scale'] = .2
         if self.cli_args.augmented or self.cli_args.augment_rotate:
@@ -160,7 +172,6 @@ class CovidSegmentationTrainingApp:
         self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
         self.seg_model, self.aug_model = self.init_model()
         self.optim = self.init_optim()
-        self.window = self.cli_args.ct_window
         self.train_dl, self.valid_dl = self.init_dl()
         self.scheduler = self.init_scheduler()
         self.loss_func = self.init_loss_func()
@@ -171,7 +182,7 @@ class CovidSegmentationTrainingApp:
         seg_model = UNetWrapper(
             in_channels=self.width_irc[0],
             n_classes=1,
-            depth=3,
+            depth=self.cli_args.depth,
             wf=4,
             padding=True,
             pad_type=self.cli_args.pad_type,
@@ -209,12 +220,13 @@ class CovidSegmentationTrainingApp:
         splitter = partial(list_stride_splitter, val_stride=10)
 
         train_ds = TrainingCovid2dSegmentationDataset(
-            window=self.window,
+            steps_per_epoch=self.cli_args.steps_per_epoch,
+            window=self.cli_args.ct_window,
             splitter=splitter,
             width_irc=self.width_irc)
 
         valid_ds = Covid2dSegmentationDataset(
-            window=self.window,
+            window=self.cli_args.ct_window,
             is_valid=True,
             splitter=splitter)
 
@@ -434,7 +446,11 @@ class CovidSegmentationTrainingApp:
             'optimizer_state': self.optim.state_dict(),
             'optimizer_name': type(self.optim).__name__,
             'epoch': epoch,
-            'total_training_samples_count': self.total_training_samples_count
+            'total_training_samples_count': self.total_training_samples_count,
+            'in_channels': self.width_irc[0],
+            'depth': self.cli_args.depth,
+            'pad_type': self.cli_args.pad_type,
+            'window': self.cli_args.ct_window
         }
 
         torch.save(state, file_path)
