@@ -176,6 +176,7 @@ class CovidSegmentationTrainingApp:
         self.scheduler = self.init_scheduler()
         self.loss_func = self.init_loss_func()
         self.total_training_samples_count = 0
+        self.batch_count = 0
         self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
 
     def init_model(self):
@@ -282,6 +283,8 @@ class CovidSegmentationTrainingApp:
             metrics[METRICS_TP_IDX, start_idx:end_idx] = tp 
             metrics[METRICS_FN_IDX, start_idx:end_idx] = fn
             metrics[METRICS_FP_IDX, start_idx:end_idx] = fp 
+
+        self.batch_count += 1
 
         # we want to maximize recall so we give the false negatives 
         # a larger impact on the loss (recall_priority times more)

@@ -1,4 +1,5 @@
 import torch
+import pickle
 import numpy as np
 
 from collections import namedtuple
@@ -22,17 +23,6 @@ def window_image(img, window_name):
     if type(img).__name__=='Tensor':
         return img.clamp(img_min, img_max)
     return img.clip(img_min, img_max)
-
-def normalize_image(image, window_name):
-    if window_name is None:
-        bins_path = 'bins.pkl'
-    elif window_name == 'lung':
-        bins_path = 'bins_lung_window.pkl'
-
-    with open(bins_path, 'rb') as handle:
-        bins = pickle.load(handle)
-
-    return hist_scaled(img, bins)
 
 
 def list_stride_splitter(array, val_stride):
@@ -60,23 +50,17 @@ def importstr(module_str, from_=None):
             raise ImportError('{}.{}'.format(module_str, from_))
     return module
 
-# helper functions below are slightly modified code snippets from
-# https://github.com/fastai/fastai2/blob/master/fastai2/medical/imaging.py
-
-def array_freqhist_bins(img, n_bins=100):
-    "A numpy based function to split the range of pixel values into groups, such that each group has around the same number of pixels"
-    imsd = np.sort(img.flatten())
-    t = np.array([0.001])
-    t = np.append(t, np.arange(n_bins)/n_bins+(1/2/n_bins))
-    t = np.append(t, 0.999)
-    t = (len(imsd)*t+0.5).astype(np.int)
-    return np.unique(imsd[t])
-
-def hist_scaled(img,  brks=None):
-    if brks is None: brks = array_freqhist_bins(img)
-    ys = np.linspace(0., 1., len(brks))
-    x = img.flatten()
-    x = np.interp(x, brks, ys)
-    return torch.tensor(x).reshape(img.shape).clamp(0.,1.)
+def find_borders(mask_list, thresh):
+    left, right = 0, len(mask_list)-1
+    while left != right and (mask_list[left] < thresh or mask_list[right] < thresh):
+        if mask_list[left] < thresh:
+            left += 1
+        if left == right:
+            break
+        if mask_list[right] < thresh:
+            right -= 1
+        if left == right:
+            break
+    return left, right
 
 
