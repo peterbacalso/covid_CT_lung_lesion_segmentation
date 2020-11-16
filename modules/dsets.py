@@ -8,7 +8,6 @@ import functools
 import numpy as np
 import pandas as pd
 import nibabel as nib
-
 from pathlib import Path
 from scipy import ndimage
 from dotenv import load_dotenv
@@ -49,7 +48,7 @@ class Ct:
         self.affine = ct.affine
 
         self.mask = None
-        self.lesions = None
+        self.coords = None
         self.positive_indices = None
         if len(ct_paths) > 1:
             assert len(ct_paths) <= 2, repr([uid, ct_paths])
@@ -57,9 +56,9 @@ class Ct:
 
             seg = nib.load(ct_paths[1])
             self.mask = seg.get_fdata().T
-            lesions_dict = get_lesions_dict()
-            if uid in lesions_dict:
-                self.lesions = lesions_dict[uid]
+            coords_dict = get_coords_dict()
+            if uid in coords_dict:
+                self.coords = coords_dict[uid]
             self.positive_indices = self.mask.sum(axis=(1,2))\
                                     .nonzero()[0].tolist()
 
@@ -97,7 +96,7 @@ class Ct:
         return lesions if not output_df \
             else pd.DataFrame(lesions, columns=lesion_cols)
 
-    def get_raw_lesion(self, center_irc, width_irc):
+    def get_raw_coord(self, center_irc, width_irc):
         slice_list = []
         for axis, center_val in enumerate(center_irc):
             start_idx = int(round(center_val - width_irc[axis]/2))
@@ -107,7 +106,7 @@ class Ct:
             assert center_val > 0 and center_val < self.hu.shape[axis], \
                 repr([self.uid, center_irc, axis, width_irc])
 
-            # shift if lesion is at the border of the axis
+            # shift if coord is at the border of the axis
             if start_idx < 0:
                 start_idx = 0
                 end_idx = width_irc[axis]
@@ -125,23 +124,23 @@ class Ct:
 
 
 @functools.lru_cache(1)
-def get_lesions_dict():
-    df_lesions = pd.read_feather('metadata/df_lesion_coords.fth')
-    lesions_dict = {}
+def get_coords_dict():
+    df_coords = pd.read_feather('../metadata/df_all_coords.fth')
+    coords_dict = {}
 
-    for _, lesion in df_lesions.iterrows():
-        lesions_dict.setdefault(lesion.uid, []).append(lesion)
+    for _, coord in df_coords.iterrows():
+        coords_dict.setdefault(coord.uid, []).append(coord)
 
-    return lesions_dict 
+    return coords_dict 
 
 @functools.lru_cache(1, typed=True)
 def get_ct(uid, dataset_path=None):
     return Ct(uid, dataset_path)
 
 @raw_cache.memoize(typed=True)
-def get_raw_lesion(uid, center_irc, width_irc): 
+def get_raw_coord(uid, center_irc, width_irc): 
     ct = get_ct(uid)
-    hu_chunk, pos_chunk, center_irc = ct.get_raw_lesion(center_irc, width_irc)
+    hu_chunk, pos_chunk, center_irc = ct.get_raw_coord(center_irc, width_irc)
     return hu_chunk, pos_chunk, center_irc
 
 @raw_cache.memoize(typed=True)
@@ -157,7 +156,7 @@ class Covid2dSegmentationDataset(Dataset):
         if uid:
             self.uid_list = [uid]
         else:
-            self.uid_list = sorted(get_lesions_dict().keys())
+            self.uid_list = sorted(get_coords_dict().keys())
 
         if is_valid:
             assert splitter
@@ -180,16 +179,16 @@ class Covid2dSegmentationDataset(Dataset):
 
         self.context_slice_count = context_slice_count
 
-        self.lesions = pd.read_feather('metadata/df_lesion_coords.fth')
-        self.lesions.sort_values(by='uid',inplace=True)
         uid_set = set(self.uid_list)
-        self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
-
+        self.all_coords = pd.read_feather('../metadata/df_all_coords.fth')
+        self.all_coords.sort_values(by='uid',inplace=True)
+        self.all_coords = self.all_coords[self.all_coords.uid.isin(uid_set)]
+        
         log.info(f"{type(self).__name__}: " \
                  + "{} mode, ".format({None:'general',True:'validation',False:'training'}[is_valid]) \
                  + f"{len(self.uid_list)} uid's, " \
                  + f"{len(self.index_slices)} index slices, " \
-                 + f"{len(self.lesions)} lesions")
+                 + f"{len(self.all_coords)} total coords")
 
     def __len__(self):
         return len(self.index_slices)
@@ -198,6 +197,7 @@ class Covid2dSegmentationDataset(Dataset):
         random.shuffle(self.index_slices)
 
     def __getitem__(self, idx):
+
         uid, slice_idx = self.index_slices[idx % len(self.index_slices)]
         return self.getitem_fullslice(uid, slice_idx)
 
@@ -222,29 +222,58 @@ class Covid2dSegmentationDataset(Dataset):
 
 class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
-    def __init__(self, width_irc, steps_per_epoch=1e4, 
-                 is_valid=False, *args, **kwargs):
+    def __init__(self, width_irc, is_valid=False, ratio_int=0, *args, **kwargs):
         super().__init__(is_valid=is_valid, *args, **kwargs)
 
         self.width_irc = width_irc # only be using 66% of this so make the width_irc 1.5 times larger than intended
-        self.steps_per_epoch = int(steps_per_epoch)
+        self.ratio_int = ratio_int
 
-        log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
+        if self.ratio_int:
+            uid_set = set(self.uid_list)
+
+            self.coords = self.all_coords[self.all_coords.has_annot==False].copy()
+            self.coords.sort_values(by='uid',inplace=True)
+            self.coords = self.coords[self.coords.uid.isin(uid_set)]
+
+            self.lesions = self.all_coords[self.all_coords.has_annot==True].copy()
+            self.lesions.sort_values(by='uid',inplace=True)
+            self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
+
+            log.info(f"{type(self).__name__}: {self.width_irc} width_irc, " \
+                     + f"{len(self.coords)} coords, " \
+                     + f"{len(self.lesions)} lesions")
+        else:
+            log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
 
     def __len__(self):
-        return self.steps_per_epoch
+        if self.ratio_int:
+            return len(self.all_coords) // 2
+        else:
+            return len(self.all_coords) 
 
     def shuffle(self):
+        self.coords = self.coords.sample(frac=1)
         self.lesions = self.lesions.sample(frac=1)
 
     def __getitem__(self, idx):
-        lesion = self.lesions.iloc[idx % len(self.lesions)]
-        return self.getitem_cropslice(lesion)
+        if self.ratio_int:
+            lesion_idx = idx // (self.ratio_int+1)
+            if idx % (self.ratio_int+1):
+                coord_idx = idx -1 - lesion_idx
+                coord_idx %= len(self.coords)
+                coord = self.coords.iloc[coord_idx]
+            else:
+                lesion_idx %= len(self.lesions)
+                coord = self.lesions.iloc[lesion_idx]
+        else:
+            coord = self.all_coords.iloc[idx]
 
-    def getitem_cropslice(self, lesion):
-        hu_chunk, mask_chunk, center_irc = get_raw_lesion(
-            lesion.uid,
-            tuple(lesion[['coordI', 'coordR', 'coordC']]),
+        return self.getitem_cropslice(coord)
+
+    def getitem_cropslice(self, coord):
+        hu_chunk, mask_chunk, center_irc = get_raw_coord(
+            coord.uid,
+            tuple(coord[['coordI', 'coordR', 'coordC']]),
             self.width_irc)
 
         mask = mask_chunk[self.context_slice_count:self.context_slice_count+1]
@@ -263,7 +292,7 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         mask = torch.from_numpy(mask[:, row_offset:row_offset+row_width, 
                 col_offset:col_offset+col_width]).to(torch.float32)
 
-        return hu_chunk, mask, lesion.uid, lesion.coordI
+        return hu_chunk, mask, coord.uid, coord.coordI
 
 
 class PrepcacheCovidDataset(Dataset):
@@ -271,22 +300,22 @@ class PrepcacheCovidDataset(Dataset):
         super().__init__(*args, **kwargs)
 
         self.width_irc = width_irc
-        self.lesions = pd.read_feather('metadata/df_lesion_coords.fth')
+        self.coords = pd.read_feather('../metadata/df_all_coords.fth')
 
         self.seen_set = set()
-        self.lesions.sort_values(by='uid', inplace=True)
+        self.coords.sort_values(by='uid', inplace=True)
 
     def __len__(self):
-        return len(self.lesions)
+        return len(self.coords)
 
     def __getitem__(self, idx):
 
-        lesion = self.lesions.iloc[idx]
-        get_raw_lesion(lesion.uid, 
-                        tuple(lesion[['coordI', 'coordR', 'coordC']]),
-                        self.width_irc)
+        coord = self.coords.iloc[idx]
+        get_raw_coord(coord.uid, 
+                      tuple(coord[['coordI', 'coordR', 'coordC']]),
+                      self.width_irc)
 
-        uid = lesion.uid
+        uid = coord.uid
         if uid not in self.seen_set:
             self.seen_set.add(uid)
             get_ct_index_info(uid)
