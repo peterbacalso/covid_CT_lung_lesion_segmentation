@@ -12,7 +12,7 @@ from functools import partial
 from fastprogress.fastprogress import master_bar, progress_bar
 
 from torch import nn
-from torch.optim import SGD
+from torch.optim import SGD, Adam
 from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 
@@ -54,15 +54,15 @@ class CovidSegmentationTrainingApp:
             type=int
         )
         parser.add_argument(
-            '--steps-per-epoch',
-            help='Length of dataset',
-            default=1e4,
-            type=int
-        )
-        parser.add_argument(
             '--epochs',
             help='Total iterations to feed the entire dataset to the model',
             default=1,
+            type=int
+        )
+        parser.add_argument(
+            '--steps-per-epoch',
+            help='default 10000',
+            default=10000,
             type=int
         )
         parser.add_argument(
@@ -82,6 +82,12 @@ class CovidSegmentationTrainingApp:
             help='UNet Depth',
             default=3,
             type=int
+        )
+        parser.add_argument(
+            '--project-name',
+            help='Name of project to save in wandb',
+            default='covid19_seg',
+            type=str
         )
         parser.add_argument(
             '--run-name',
@@ -147,8 +153,14 @@ class CovidSegmentationTrainingApp:
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
 
         if self.cli_args.epochs == 0:
-            wandb.init(project="covid19_seg", name=self.cli_args.run_name)
+            wandb.init(project=self.cli_args.project_name, name=self.cli_args.run_name)
             raise
+        if self.cli_args.run_name is None:
+            wandb.init(project=self.cli_args.project_name, config=self.cli_args)
+        else:
+            wandb.init(project=self.cli_args.project_name, 
+                       config=self.cli_args,
+                       name=self.cli_args.run_name)
 
         assert self.cli_args.pad_type in ('zero', 'reflect', 'replicate'), repr(self.cli_args.pad_type)
         if self.cli_args.ct_window is not None:
@@ -171,13 +183,13 @@ class CovidSegmentationTrainingApp:
 
         self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
         self.seg_model, self.aug_model = self.init_model()
+        wandb.watch(self.seg_model) # apparently magic
         self.optim = self.init_optim()
         self.train_dl, self.valid_dl = self.init_dl()
         self.scheduler = self.init_scheduler()
         self.loss_func = self.init_loss_func()
         self.total_training_samples_count = 0
         self.batch_count = 0
-        self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
 
     def init_model(self):
         seg_model = UNetWrapper(
@@ -202,9 +214,10 @@ class CovidSegmentationTrainingApp:
 
         return seg_model, aug_model
 
-    def init_optim(self, lr=3e-3, momentum=.99):
-        return SGD(self.seg_model.parameters(), lr=lr, 
-                   momentum=momentum, weight_decay=1e-4)
+    def init_optim(self, lr=1e-3, momentum=.99):
+        #return SGD(self.seg_model.parameters(), lr=lr, 
+        #           momentum=momentum, weight_decay=1e-4)
+        return Adam(self.seg_model.parameters())
 
     def init_loss_func(self):
         def dice_loss(pred_g, label_g, epsilon=1):
@@ -243,7 +256,7 @@ class CovidSegmentationTrainingApp:
 
         valid_dl = DataLoader(
             valid_ds,
-            batch_size=batch_size,
+            batch_size=batch_size//2,
             num_workers=self.cli_args.num_workers,
             pin_memory=self.use_cuda)
 
@@ -369,7 +382,7 @@ class CovidSegmentationTrainingApp:
 
     def log_images(self, epoch, mode_str, dl, thresh=.5):
         self.seg_model.eval()
-        uid_list = dl.dataset.lesions.groupby(by='uid').first()\
+        uid_list = dl.dataset.coords.groupby(by='uid').first()\
             .reset_index().sort_values(by='uid')[:8]
         mask_list = []
         for i, row in uid_list.iterrows():
@@ -470,13 +483,6 @@ class CovidSegmentationTrainingApp:
             log.info("SHA1: " + hashlib.sha1(f.read()).hexdigest())
 
     def main(self):
-        if self.cli_args.run_name is None:
-            wandb.init(project="covid19_seg", config=self.cli_args)
-        else:
-            wandb.init(project="covid19_seg", 
-                       config=self.cli_args,
-                       name=self.cli_args.run_name)
-        wandb.watch(self.seg_model) # apparently magic
 
         log.info(f"Starting {type(self).__name__}, {self.cli_args}")
         best_score = 0.

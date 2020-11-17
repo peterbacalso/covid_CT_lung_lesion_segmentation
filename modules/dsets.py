@@ -24,7 +24,7 @@ load_dotenv()
 data_dir = os.environ.get('datasets_path')
 local_dataset_path = Path(f'{data_dir}/COVID-19-20_v2')
 
-raw_cache = FanoutCache('data/cache/raw', shards=64, 
+raw_cache = FanoutCache('cache/raw', shards=64, 
                         timeout=1, size_limit=3e11)
 
 # set logging level
@@ -65,7 +65,8 @@ class Ct:
 
     def group_lesions(self, output_df=True):
         # get rid of tiny lesions by using morphology erosion
-        clean_mask = ndimage.binary_erosion(self.mask)
+        clean_mask = ndimage.binary_erosion(self.mask, iterations=3)
+        #clean_mask = self.mask
         # group blobs that are together
         lesion_labels, lesion_count = ndimage.label(clean_mask) 
         properties = regionprops(lesion_labels)
@@ -125,10 +126,10 @@ class Ct:
 
 @functools.lru_cache(1)
 def get_coords_dict():
-    df_coords = pd.read_feather('../metadata/df_all_coords.fth')
+    coords = pd.read_feather('metadata/df_lesions_erosion.fth')
     coords_dict = {}
 
-    for _, coord in df_coords.iterrows():
+    for _, coord in coords.iterrows():
         coords_dict.setdefault(coord.uid, []).append(coord)
 
     return coords_dict 
@@ -151,7 +152,7 @@ def get_ct_index_info(uid):
 class Covid2dSegmentationDataset(Dataset):
 
     def __init__(self, uid=None, is_valid=None, splitter=None, 
-                 is_full_ct=False, window=None, context_slice_count=3):
+                 is_full_ct=False, window=None, context_slice_count=2):
 
         if uid:
             self.uid_list = [uid]
@@ -180,15 +181,15 @@ class Covid2dSegmentationDataset(Dataset):
         self.context_slice_count = context_slice_count
 
         uid_set = set(self.uid_list)
-        self.all_coords = pd.read_feather('../metadata/df_all_coords.fth')
-        self.all_coords.sort_values(by='uid',inplace=True)
-        self.all_coords = self.all_coords[self.all_coords.uid.isin(uid_set)]
-        
+        self.coords = pd.read_feather('metadata/df_lesions_erosion.fth')
+        self.coords.sort_values(by='uid',inplace=True)
+        self.coords = self.coords[self.coords.uid.isin(uid_set)]
+
         log.info(f"{type(self).__name__}: " \
                  + "{} mode, ".format({None:'general',True:'validation',False:'training'}[is_valid]) \
                  + f"{len(self.uid_list)} uid's, " \
                  + f"{len(self.index_slices)} index slices, " \
-                 + f"{len(self.all_coords)} total coords")
+                 + f"{len(self.coords)} total coords")
 
     def __len__(self):
         return len(self.index_slices)
@@ -222,52 +223,23 @@ class Covid2dSegmentationDataset(Dataset):
 
 class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
-    def __init__(self, width_irc, is_valid=False, ratio_int=0, *args, **kwargs):
+    def __init__(self, width_irc, is_valid=False, 
+                 steps_per_epoch=10000, *args, **kwargs):
         super().__init__(is_valid=is_valid, *args, **kwargs)
 
         self.width_irc = width_irc # only be using 66% of this so make the width_irc 1.5 times larger than intended
-        self.ratio_int = ratio_int
+        self.steps_per_epoch = steps_per_epoch
 
-        if self.ratio_int:
-            uid_set = set(self.uid_list)
-
-            self.coords = self.all_coords[self.all_coords.has_annot==False].copy()
-            self.coords.sort_values(by='uid',inplace=True)
-            self.coords = self.coords[self.coords.uid.isin(uid_set)]
-
-            self.lesions = self.all_coords[self.all_coords.has_annot==True].copy()
-            self.lesions.sort_values(by='uid',inplace=True)
-            self.lesions = self.lesions[self.lesions.uid.isin(uid_set)]
-
-            log.info(f"{type(self).__name__}: {self.width_irc} width_irc, " \
-                     + f"{len(self.coords)} coords, " \
-                     + f"{len(self.lesions)} lesions")
-        else:
-            log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
+        log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
 
     def __len__(self):
-        if self.ratio_int:
-            return len(self.all_coords) // 2
-        else:
-            return len(self.all_coords) 
+        return self.steps_per_epoch
 
     def shuffle(self):
         self.coords = self.coords.sample(frac=1)
-        self.lesions = self.lesions.sample(frac=1)
 
     def __getitem__(self, idx):
-        if self.ratio_int:
-            lesion_idx = idx // (self.ratio_int+1)
-            if idx % (self.ratio_int+1):
-                coord_idx = idx -1 - lesion_idx
-                coord_idx %= len(self.coords)
-                coord = self.coords.iloc[coord_idx]
-            else:
-                lesion_idx %= len(self.lesions)
-                coord = self.lesions.iloc[lesion_idx]
-        else:
-            coord = self.all_coords.iloc[idx]
-
+        coord = self.coords.iloc[idx % len(self.coords)]
         return self.getitem_cropslice(coord)
 
     def getitem_cropslice(self, coord):
@@ -300,7 +272,7 @@ class PrepcacheCovidDataset(Dataset):
         super().__init__(*args, **kwargs)
 
         self.width_irc = width_irc
-        self.coords = pd.read_feather('../metadata/df_all_coords.fth')
+        self.coords = pd.read_feather('metadata/df_lesions_erosion.fth')
 
         self.seen_set = set()
         self.coords.sort_values(by='uid', inplace=True)
