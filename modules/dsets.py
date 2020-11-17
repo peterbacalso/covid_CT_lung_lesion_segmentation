@@ -63,9 +63,12 @@ class Ct:
                                     .nonzero()[0].tolist()
 
 
-    def group_lesions(self, output_df=True):
+    def group_lesions(self, output_df=True, num_erosions=0):
         # get rid of tiny lesions by using morphology erosion
-        clean_mask = ndimage.binary_erosion(self.mask, iterations=3)
+        if num_erosions > 0:
+            clean_mask = ndimage.binary_erosion(self.mask, iterations=num_erosions)
+        else:
+            clean_mask = self.mask
         #clean_mask = self.mask
         # group blobs that are together
         lesion_labels, lesion_count = ndimage.label(clean_mask) 
@@ -77,7 +80,9 @@ class Ct:
             index=np.arange(1,lesion_count+1))
         lesion_cols = ['uid', 'coordI', 'coordR', 'coordC', 
                        'min_index', 'max_index', 'min_row', 'max_row', 
-                       'min_column', 'max_column', 'largest_side_px']
+                       'min_column', 'max_column', 
+                       'index_width', 'row_width', 'column_width',
+                       'largest_side_px']
         lesions = []
 
         assert len(properties) == len(center_irc_list), repr([len(properties), len(center_irc_list)])
@@ -85,13 +90,14 @@ class Ct:
         # center_of_mass will produce floating point values so we round
         for i, (center_irc, p) in enumerate(zip_iter):
             min_i, min_r, min_c, max_i, max_r, max_c = p.bbox
-            largest_side = max(max_c-min_c, max_r-min_r, max_c-min_c)
+            largest_side = max(max_i-min_i, max_r-min_r, max_c-min_c)
             lesions.append([self.uid, 
                             int(round(center_irc[0])), 
                             int(round(center_irc[1])), 
                             int(round(center_irc[2])),
                             min_i, max_i, min_r,
                             max_r, min_c, max_c,
+                            max_i-min_i, max_r-min_r, max_c-min_c,
                             largest_side])
 
         return lesions if not output_df \
@@ -126,7 +132,7 @@ class Ct:
 
 @functools.lru_cache(1)
 def get_coords_dict():
-    coords = pd.read_feather('metadata/df_lesions_erosion.fth')
+    coords = pd.read_feather('metadata/df_coords.fth')
     coords_dict = {}
 
     for _, coord in coords.iterrows():
@@ -152,7 +158,7 @@ def get_ct_index_info(uid):
 class Covid2dSegmentationDataset(Dataset):
 
     def __init__(self, uid=None, is_valid=None, splitter=None, 
-                 is_full_ct=False, window=None, context_slice_count=2):
+                 is_full_ct=False, window=None, context_slice_count=3):
 
         if uid:
             self.uid_list = [uid]
@@ -181,7 +187,7 @@ class Covid2dSegmentationDataset(Dataset):
         self.context_slice_count = context_slice_count
 
         uid_set = set(self.uid_list)
-        self.coords = pd.read_feather('metadata/df_lesions_erosion.fth')
+        self.coords = pd.read_feather('metadata/df_coords.fth')
         self.coords.sort_values(by='uid',inplace=True)
         self.coords = self.coords[self.coords.uid.isin(uid_set)]
 
@@ -250,8 +256,8 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
         mask = mask_chunk[self.context_slice_count:self.context_slice_count+1]
 
-        max_row_offset = int(math.ceil(self.width_irc[1]*.33))
-        max_col_offset = int(math.ceil(self.width_irc[2]*.33))
+        max_row_offset = int(math.ceil(self.width_irc[1]*.1))
+        max_col_offset = int(math.ceil(self.width_irc[2]*.1))
         row_offset = random.randrange(0, max_row_offset)
         col_offset = random.randrange(0, max_col_offset)
         row_width = self.width_irc[1] - max_row_offset
@@ -272,7 +278,7 @@ class PrepcacheCovidDataset(Dataset):
         super().__init__(*args, **kwargs)
 
         self.width_irc = width_irc
-        self.coords = pd.read_feather('metadata/df_lesions_erosion.fth')
+        self.coords = pd.read_feather('metadata/df_coords.fth')
 
         self.seen_set = set()
         self.coords.sort_values(by='uid', inplace=True)

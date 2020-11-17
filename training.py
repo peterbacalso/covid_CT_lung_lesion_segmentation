@@ -256,7 +256,7 @@ class CovidSegmentationTrainingApp:
 
         valid_dl = DataLoader(
             valid_ds,
-            batch_size=batch_size//2,
+            batch_size=batch_size,
             num_workers=self.cli_args.num_workers,
             pin_memory=self.use_cuda)
 
