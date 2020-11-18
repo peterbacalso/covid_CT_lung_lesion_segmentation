@@ -242,7 +242,8 @@ class CovidSegmentationTrainingApp:
         valid_ds = Covid2dSegmentationDataset(
             window=self.cli_args.ct_window,
             is_valid=True,
-            splitter=splitter)
+            splitter=splitter,
+            width_irc=self.width_irc)
 
         batch_size = self.cli_args.batch_size
         if self.use_cuda:

@@ -132,7 +132,7 @@ class Ct:
 
 @functools.lru_cache(1)
 def get_coords_dict():
-    coords = pd.read_feather('metadata/df_coords.fth')
+    coords = pd.read_feather('metadata/df_coords_debias.fth')
     coords_dict = {}
 
     for _, coord in coords.iterrows():
@@ -158,7 +158,7 @@ def get_ct_index_info(uid):
 class Covid2dSegmentationDataset(Dataset):
 
     def __init__(self, uid=None, is_valid=None, splitter=None, 
-                 is_full_ct=False, window=None, context_slice_count=3):
+                 width_irc=(7,60,60), is_full_ct=False, window=None):
 
         if uid:
             self.uid_list = [uid]
@@ -184,10 +184,11 @@ class Covid2dSegmentationDataset(Dataset):
                 self.index_slices += [(uid, slice_idx) 
                                       for slice_idx in positive_indices]
 
-        self.context_slice_count = context_slice_count
+        self.width_irc = width_irc # only be using 66% of this so make the width_irc 1.5 times larger than intended
+        self.context_slice_count = self.width_irc[0] // 2
 
         uid_set = set(self.uid_list)
-        self.coords = pd.read_feather('metadata/df_coords.fth')
+        self.coords = pd.read_feather('metadata/df_coords_debias.fth')
         self.coords.sort_values(by='uid',inplace=True)
         self.coords = self.coords[self.coords.uid.isin(uid_set)]
 
@@ -229,14 +230,12 @@ class Covid2dSegmentationDataset(Dataset):
 
 class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
-    def __init__(self, width_irc, is_valid=False, 
-                 steps_per_epoch=10000, *args, **kwargs):
+    def __init__(self, is_valid=False, steps_per_epoch=10000, *args, **kwargs):
         super().__init__(is_valid=is_valid, *args, **kwargs)
 
-        self.width_irc = width_irc # only be using 66% of this so make the width_irc 1.5 times larger than intended
         self.steps_per_epoch = steps_per_epoch
-
-        log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
+        log.info(f"{type(self).__name__}: {self.width_irc} width_irc, "
+                 + f" {self.steps_per_epoch} steps_per_epoch")
 
     def __len__(self):
         return self.steps_per_epoch
@@ -278,7 +277,7 @@ class PrepcacheCovidDataset(Dataset):
         super().__init__(*args, **kwargs)
 
         self.width_irc = width_irc
-        self.coords = pd.read_feather('metadata/df_coords.fth')
+        self.coords = pd.read_feather('metadata/df_coords_debias.fth')
 
         self.seen_set = set()
         self.coords.sort_values(by='uid', inplace=True)
