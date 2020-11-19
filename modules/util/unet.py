@@ -150,8 +150,27 @@ class UNetUpBlock(nn.Module):
         diff_x = (layer_width - target_size[1]) // 2
         return layer[:, :, diff_y:(diff_y + target_size[0]), diff_x:(diff_x + target_size[1])]
 
+    def pad_match(self, layer, target_size):
+        _, _, layer_height, layer_width = layer.size()
+        diff_y = (layer_height - target_size[0])
+        diff_x = (layer_width - target_size[1])
+        left = right = top = bot = 0
+        if diff_y % 2 == 0: # even:
+            top = bot = diff_y // 2
+        else:
+            top = diff_y // 2
+            bot = top + 1
+        if diff_x % 2 == 0: # even:
+            left = right = diff_x // 2
+        else:
+            left = diff_x // 2
+            right = left + 1
+        return left, right, top, bot
+
     def forward(self, x, bridge):
         up = self.up(x)
+        left, right, top, bot = self.pad_match(bridge, up.shape[2:])
+        up = F.pad(up, (left,right,top,bot), mode="replicate")
         crop1 = self.center_crop(bridge, up.shape[2:])
         out = torch.cat([up, crop1], 1)
         out = self.conv_block(out)
