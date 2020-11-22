@@ -360,8 +360,6 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         center_irc_list = group_lesions(aug_ct_t, aug_mask_t, num_erosions)
         #center_irc_list = []
         while len(center_irc_list) < 3:
-            #label_value = np.random.choice(2,1)[0]
-            #center_irc = get_random_center(aug_mask_t, label_value)
             center_irc = get_random_center(aug_mask_t, 1)
             center_irc_list.append(center_irc)
 
