@@ -212,16 +212,18 @@ def get_ct_augmented(augmentation_dict, uid, use_cache=True):
     return augmented_ct, augmented_mask 
 
 def group_lesions(ct_t, mask_t, num_erosions=0):
+    ct_a = ct_t.numpy()
+    mask_a = mask_t.numpy()
     # get rid of tiny lesions by using morphology erosion
     if num_erosions > 0:
-        clean_mask = ndimage.binary_erosion(mask_t, iterations=num_erosions)
+        clean_mask = ndimage.binary_erosion(mask_a, iterations=num_erosions)
     else:
-        clean_mask = mask_t
+        clean_mask = mask_a
     # group blobs that are together
     lesion_labels, lesion_count = ndimage.label(clean_mask) 
 
     center_irc_list = ndimage.center_of_mass(
-        ct_t.clip(-1000,1000) + 1001, # function needs +'ve input
+        ct_a.clip(-1000,1000) + 1001, # function needs +'ve input
         labels = lesion_labels,
         index=np.arange(1,lesion_count+1))
 
@@ -229,14 +231,20 @@ def group_lesions(ct_t, mask_t, num_erosions=0):
 
     # center_of_mass will produce floating point values so we round
     for center_irc in center_irc_list:
-        lesions.append((int(round(center_irc[0])), 
-                        int(round(center_irc[1])), 
-                        int(round(center_irc[2]))))
+        idx = max(1, int(round(center_irc[0])))
+        idx = min(mask_t.shape[-3], idx)
+        row = max(1, int(round(center_irc[1])))
+        row = min(mask_t.shape[-2], row)
+        col = max(1, int(round(center_irc[2])))
+        col = min(mask_t.shape[-1], col)
+        lesions.append((idx, row, col))
 
+    random.shuffle(lesions)
     return lesions[:3]
 
 def get_random_center(mask_t, label_value):
-    assert label_value in mask_t, repr(f'{label_value} not in mask')
+    if label_value not in mask_t:
+        label_value = 1 - label_value
     while True:
         i = np.random.choice(mask_t.shape[-3]-1,1)[0] + 1
         r = np.random.choice(mask_t.shape[-2]-1,1)[0] + 1
@@ -253,7 +261,7 @@ def get_chunk(ct_t, mask_t, center_irc, width_irc):
 
         assert width_irc[axis] <= ct_t.shape[axis], repr(f'width at axis {axis} is larger than the ct')
         assert center_val > 0 and center_val < ct_t.shape[axis], \
-            repr([center_irc, axis, width_irc])
+            repr([center_irc, axis, ct_t.shape, width_irc])
 
         # shift if coord is at the border of the axis
         if start_idx < 0:
@@ -282,11 +290,14 @@ def get_meta_dict():
 
     return meta_dict 
 
+def collate_fn(batch):
+    imgs,targets = zip(*batch)
+    return torch.cat(imgs),torch.cat(targets)
 
 class Covid2dSegmentationDataset(Dataset):
 
     def __init__(self, uid=None, is_valid=None, splitter=None, 
-                 width_irc=(7,192,192), is_full_ct=False, window=None):
+                 width_irc=(7,192,192), window=None):
 
         if uid:
             self.uid_list = [uid]
@@ -317,7 +328,7 @@ class Covid2dSegmentationDataset(Dataset):
         #ct_t, mask_t = get_spaced_ct(uid, self.width_irc)
         ct = get_ct(uid)
         ct_t = window_image(ct.ct_t, self.window)
-        return ct_t, ct.mask_t
+        return ct_t[None], ct.mask_t[None]
 
 class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
@@ -347,9 +358,11 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         num_erosions = np.random.choice(2,1)[0]
 
         center_irc_list = group_lesions(aug_ct_t, aug_mask_t, num_erosions)
+        #center_irc_list = []
         while len(center_irc_list) < 3:
-            label_value = np.random.choice(2,1)[0]
-            center_irc = get_random_center(aug_mask_t, label_value)
+            #label_value = np.random.choice(2,1)[0]
+            #center_irc = get_random_center(aug_mask_t, label_value)
+            center_irc = get_random_center(aug_mask_t, 1)
             center_irc_list.append(center_irc)
 
         ct_chunks = []
@@ -360,16 +373,16 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
                                              center_irc,
                                              self.width_irc)
             ct_chunk = window_image(ct_chunk, self.window)
-            ct_chunks.append(ct_chunk)
-            mask_chunks.append(mask_chunk)
+            ct_chunks.append(ct_chunk[None])
+            mask_chunks.append(mask_chunk[None])
         
         return torch.stack(ct_chunks), torch.stack(mask_chunks)
 
 class PrepcacheCovidDataset(Dataset):
-    def __init__(self, width_irc, *args, **kwargs):
+    def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.width_irc = width_irc
+        #self.width_irc = width_irc
         df_meta = pd.read_feather('metadata/df_meta.fth')
         self.df_meta = df_meta[df_meta.is_valid==False].sort_values(by='uid')
 

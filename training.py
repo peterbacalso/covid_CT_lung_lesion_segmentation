@@ -195,7 +195,7 @@ class CovidSegmentationTrainingApp:
 
     def init_model(self):
         seg_model = UNet3dWrapper(
-            in_channels=self.width_irc[0],
+            in_channels=1,
             n_classes=1,
             depth=self.cli_args.depth,
             wf=4,
@@ -216,16 +216,16 @@ class CovidSegmentationTrainingApp:
 
         return seg_model, aug_model
 
-    def init_optim(self, lr=1e-3, momentum=.99):
-        #return SGD(self.seg_model.parameters(), lr=lr, 
-        #           momentum=momentum, weight_decay=1e-4)
-        return Adam(self.seg_model.parameters())
+    def init_optim(self, lr=8e-3, momentum=.99):
+        return SGD(self.seg_model.parameters(), lr=lr, 
+                   momentum=momentum, weight_decay=1e-4)
+        #return Adam(self.seg_model.parameters())
 
     def init_loss_func(self):
         def dice_loss(pred_g, label_g, epsilon=1):
-            dice_correct = (pred_g * label_g).sum(dim=[1,2,3])
-            dice_label_g = label_g.sum(dim=[1,2,3])
-            dice_pred_g = pred_g.sum(dim=[1,2,3])
+            dice_correct = (pred_g * label_g).sum(dim=[-4,-3,-2,-1])
+            dice_label_g = label_g.sum(dim=[-4,-3,-2,-1])
+            dice_pred_g = pred_g.sum(dim=[-4,-3,-2,-1])
 
             dice_ratio = (2 * dice_correct + epsilon) \
                 / (dice_label_g + dice_pred_g + epsilon)
@@ -254,11 +254,11 @@ class CovidSegmentationTrainingApp:
             batch_size *= torch.cuda.device_count()
 
         train_dl = DataLoader(
-            collate_fn=collate_fn,
             train_ds,
             batch_size=batch_size,
             num_workers=self.cli_args.num_workers,
-            pin_memory=self.use_cuda)
+            pin_memory=self.use_cuda,
+            collate_fn=collate_fn)
 
         valid_dl = DataLoader(
             valid_ds,
@@ -299,9 +299,9 @@ class CovidSegmentationTrainingApp:
             pred_bool = pred_g > thresh
             mask_bool = mask_g > thresh
 
-            tp = (pred_bool * mask_bool).sum(dim=[1,2,3])
-            fn = (~pred_bool * mask_bool).sum(dim=[1,2,3])
-            fp = (pred_bool * ~mask_bool).sum(dim=[1,2,3])
+            tp = (pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
+            fn = (~pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
+            fp = (pred_bool * ~mask_bool).sum(dim=[-4,-3,-2,-1])
 
             metrics[METRICS_LOSS_IDX, start_idx:end_idx] = dice_loss
             metrics[METRICS_TP_IDX, start_idx:end_idx] = tp 
@@ -319,7 +319,8 @@ class CovidSegmentationTrainingApp:
         return loss, None, None, None
 
     def init_sliding_window(self):
-        return SlidingWindowInferer(roi_size=self.width_irc,
+        roi_size = (self.width_irc[0], self.width_irc[1], self.width_irc[2])
+        return SlidingWindowInferer(roi_size=roi_size,
                                     sw_batch_size=1,
                                     overlap=.5)
 
@@ -460,7 +461,6 @@ class CovidSegmentationTrainingApp:
             'optimizer_name': type(self.optim).__name__,
             'epoch': epoch,
             'total_training_samples_count': self.total_training_samples_count,
-            'in_channels': self.width_irc[0],
             'depth': self.cli_args.depth,
             'pad_type': self.cli_args.pad_type,
             'window': self.cli_args.ct_window
