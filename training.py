@@ -149,6 +149,11 @@ class CovidSegmentationTrainingApp:
             default=None,
             type=str
         )
+        parser.add_argument('--model-path',
+            help="Path to the saved segmentation model for resuming training",
+            nargs='?',
+            default=None
+        )
 
         self.cli_args = parser.parse_args(argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
@@ -185,13 +190,17 @@ class CovidSegmentationTrainingApp:
         self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
         self.seg_model, self.aug_model = self.init_model()
         wandb.watch(self.seg_model) # apparently magic
-        self.optim = self.init_optim()
         self.train_dl, self.valid_dl = self.init_dl()
-        self.scheduler = self.init_scheduler()
+        #self.scheduler = self.init_scheduler()
         self.loss_func = self.init_loss_func()
         self.sliding_window = self.init_sliding_window()
         self.total_training_samples_count = 0
         self.batch_count = 0
+
+        if self.cli_args.model_path is not None:
+            self.resume_training()
+
+        self.optim = self.init_optim()
 
     def init_model(self):
         seg_model = UNet3dWrapper(
@@ -217,9 +226,9 @@ class CovidSegmentationTrainingApp:
         return seg_model, aug_model
 
     def init_optim(self, lr=8e-3, momentum=.99):
-        return SGD(self.seg_model.parameters(), lr=lr, 
-                   momentum=momentum, weight_decay=1e-4)
-        #return Adam(self.seg_model.parameters())
+        #return SGD(self.seg_model.parameters(), lr=lr, 
+        #           momentum=momentum, weight_decay=1e-4)
+        return Adam(self.seg_model.parameters())
 
     def init_loss_func(self):
         def dice_loss(pred_g, label_g, epsilon=1):
@@ -272,6 +281,12 @@ class CovidSegmentationTrainingApp:
         return OneCycleLR(self.optim, max_lr=3e-1,
                           steps_per_epoch=len(self.train_dl),
                           epochs=self.cli_args.epochs)
+
+    def resume_training(self):
+        model_dict = torch.load(self.cli_args.model_path)
+        self.seg_model.load_state_dict(model_dict['model_state'])
+        #self.optim.load_state_dict(model_dict['optimizer_state'])
+
 
     def batch_loss(self, idx, batch, batch_size, metrics, 
                    is_train=True, thresh=.5, get_sample=False):
@@ -344,7 +359,7 @@ class CovidSegmentationTrainingApp:
                     is_train=train, get_sample=(i==len(dl)-1))
                 loss.backward()
                 self.optim.step()
-                self.scheduler.step()
+                #self.scheduler.step()
             else:
                 with torch.no_grad():
                     _, ct_t, mask_t, pred_t = self.batch_loss(

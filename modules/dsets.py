@@ -57,7 +57,7 @@ class Ct:
             seg = nib.load(ct_paths[1])
             self.mask_t = torch.from_numpy(seg.get_fdata().T).float()
         else:
-            self.mask_t = torch.zeros_like(ct_t)
+            self.mask_t = torch.zeros_like(self.ct_t)
 
     '''
     def get_spaced_ct(self, width_irc, mode='bilinear', from_spacing=None, 

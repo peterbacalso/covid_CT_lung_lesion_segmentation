@@ -6,12 +6,13 @@ import nibabel as nib
 
 from pathlib import Path
 from scipy import ndimage
+from monai.inferers import SlidingWindowInferer
 
 from torch import nn
 from torch.utils.data import DataLoader
 
 # local imports
-from modules.model import UNetWrapper
+from modules.model import UNet3dWrapper
 from modules.util.logconf import logging
 from modules.dsets import Covid2dSegmentationDataset, get_ct
 
@@ -30,7 +31,7 @@ class CovidInferenceApp:
         parser = argparse.ArgumentParser()
         parser.add_argument('--batch-size',
             help='Batch size to use for training',
-            default=4,
+            default=1,
             type=int,
         )
         parser.add_argument('--num-workers',
@@ -58,6 +59,11 @@ class CovidInferenceApp:
             default=None,
             help="CT UID to use.",
         )
+        parser.add_argument('--width-irc',
+            nargs='+',
+            help='Pass 3 values: Index, Row, Column',
+            default=[12,192,192]
+        )
 
         self.cli_args = parser.parse_args(sys_argv)
         if not (bool(self.cli_args.uid) ^ self.cli_args.run_all):
@@ -69,7 +75,9 @@ class CovidInferenceApp:
         if not self.cli_args.model_path:
             raise Exception("Path to segmentation model should be given")
 
+        self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
         self.model = self.init_model()
+        self.sliding_window = self.init_sliding_window()
 
     def init_model(self):
         log.debug(self.cli_args.model_path)
@@ -77,8 +85,8 @@ class CovidInferenceApp:
 
         self.window = model_dict['window']
         
-        model = UNetWrapper(
-            in_channels=model_dict['in_channels'],
+        model = UNet3dWrapper(
+            in_channels=1,
             n_classes=1,
             depth=model_dict['depth'],
             wf=4,
@@ -97,11 +105,17 @@ class CovidInferenceApp:
 
         return model
 
+    def init_sliding_window(self):
+        roi_size = (self.width_irc[0], self.width_irc[1], self.width_irc[2])
+        return SlidingWindowInferer(roi_size=roi_size,
+                                    sw_batch_size=1,
+                                    overlap=.5)
+
     def init_dl(self, uid):
         ds = Covid2dSegmentationDataset(
             uid=uid,
             window=self.window, 
-            is_full_ct=True)
+            width_irc=self.width_irc)
         dl = DataLoader(
             ds,
             batch_size=self.cli_args.batch_size * (torch.cuda.device_count() \
@@ -112,18 +126,22 @@ class CovidInferenceApp:
 
     def segment_ct(self, ct, uid):
         with torch.no_grad():
-            output = np.zeros_like(ct.hu, dtype=np.float32)
             dl = self.init_dl(uid)
-            for hu, _, _, slice_idx_list in dl:
-                hu = hu.to(self.device)
-                pred = self.model(hu)
-
-                for i, slice_idx in enumerate(slice_idx_list):
-                    output[slice_idx] = pred[i].cpu().numpy()
-
-            mask = output > .5
-            #eroded_mask = ndimage.binary_erosion(mask)
-
+            for ct_t, _ in dl:
+                log.info(f"input shape {ct_t.squeeze().shape}")
+                ct_g = ct_t.to(self.device)
+                preds = self.sliding_window(ct_g, self.model)
+                n = 1.0
+                for dims in [[-2], [-1]]:
+                    flip_ct_g = torch.flip(ct_g, dims=dims)
+                    flip_pred = self.sliding_window(flip_ct_g, self.model)
+                    pred = torch.flip(flip_pred, dims=dims)
+                    preds = preds + pred
+                    n = n + 1.0
+            preds = preds / n
+            preds = preds.detach().cpu().squeeze().numpy()
+            mask = preds > .5
+            log.info(f"output shape {mask.shape}")
         return mask
 
     def main(self):
@@ -143,9 +161,9 @@ class CovidInferenceApp:
 
         for uid in uid_set:
             ct = get_ct(uid, self.cli_args.data_path)
-            mask = self.segment_ct(ct, uid)
-            mask = mask.astype(np.float64)
-            nifti_mask = nib.Nifti1Image(mask.T, affine=ct.affine)
+            mask_a = self.segment_ct(ct, uid)
+            mask_a = mask_a.astype(np.float64)
+            nifti_mask = nib.Nifti1Image(mask_a.T, affine=ct.affine)
             nib.save(nifti_mask, output_folder_path/f'{uid}.nii.gz')
 
 if __name__=='__main__':

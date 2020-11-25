@@ -9,6 +9,7 @@ submission/
 submission.zip
 cache/
 experiments.ipynb
+experiments*.ipynb
 experiments/
 
 #
