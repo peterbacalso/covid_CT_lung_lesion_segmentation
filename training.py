@@ -178,7 +178,7 @@ class CovidSegmentationTrainingApp:
 
         assert self.cli_args.pad_type in ('zero', 'reflect', 'replicate'), repr(self.cli_args.pad_type)
         if self.cli_args.ct_window is not None:
-            assert self.cli_args.ct_window in ('lung', 'mediastinal', 'dist')
+            assert self.cli_args.ct_window in ('lung', 'mediastinal', 'shifted_lung')
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
@@ -232,9 +232,9 @@ class CovidSegmentationTrainingApp:
         return seg_model, aug_model, gaus_model
 
     def init_optim(self, lr=1e-3, momentum=.99):
-        #return SGD(self.seg_model.parameters(), lr=lr, 
-        #           momentum=momentum, weight_decay=1e-4)
-        return Adam(self.seg_model.parameters())
+        return SGD(self.seg_model.parameters(), lr=lr, 
+                   momentum=momentum, weight_decay=1e-4)
+        #return Adam(self.seg_model.parameters())
 
     def init_loss_func(self):
         loss_func = getattr(loss_funcs, self.cli_args.loss_func)
@@ -290,6 +290,7 @@ class CovidSegmentationTrainingApp:
                 ct_g = self.gaus_model(ct_g)
 
         pred_g = self.seg_model(ct_g)
+        
 
         loss = self.loss_func(pred_g, mask_g)
         fine_loss = self.loss_func(pred_g*mask_g, mask_g)
@@ -404,66 +405,42 @@ class CovidSegmentationTrainingApp:
         return metrics_dict
 
     def log_images(self, epoch, mode_str, dl, ct_t, mask_t, pred_t, thresh=.5):
-        self.seg_model.eval()
-        uid_list = dl.dataset.coords.groupby(by='uid').first()\
-            .reset_index().sort_values(by='uid')[:4]
         mask_list = []
-        for i, row in uid_list.iterrows():
-            uid, *_ = row
-            ct = get_ct(uid)
+        for idx in range(min(50,pred_t.shape[0])):
 
-            for slice_idx in range(6):
-                if mode_str=='trn':
-                    ct_slice = dl.dataset.getitem_cropslice(row)
-                else:
-                    ct_idx = slice_idx * (ct.ct_a.shape[0] - 1) // 5
-                    ct_slice = dl.dataset.getitem_fullslice(uid, ct_idx)
+            pred_bool = pred_t.numpy()[idx].squeeze() > thresh 
+            mask_bool = mask_t.numpy()[idx].squeeze() > thresh
+            ct_slice = ct_t.numpy()[idx][self.width_irc[0] // 2]
 
-                ct_a, mask, *_ = ct_slice 
-                ct_g = ct_a.to(self.device).unsqueeze(0)
-                mask_g = mask.to(self.device).unsqueeze(0)
+            mask_data = np.zeros_like(pred_bool).astype(np.int)
+            mask_data += 1 * pred_bool & mask_bool # true positives
+            mask_data += 2 * (~pred_bool & mask_bool) # false negatives 
+            mask_data += 3 * (pred_bool & ~mask_bool) # false positives
 
-                pred_g = self.seg_model(ct_g)[0]
-                pred_bool = pred_g.cpu().detach().numpy()[0] > thresh 
-                mask_bool = mask_g.cpu().numpy()[0][0] > thresh
+            class_labels = {
+                1: "True Positive",
+                2: "False Negative",
+                3: "False Positive"
+            }
 
-                # normalize range 
-                ct_a[:-1,:,:] /= 2000 # range -0.5 to 0.5
-                ct_a[:-1,:,:] += .5   # range 0 to 1
-                if mode_str == 'trn':
-                    ct_slice = ct_a[slice_idx % ct_a.shape[0]].numpy()
-                else:
-                    ct_slice = ct_a[dl.dataset.context_slice_count].numpy()
+            truth_mask = np.zeros_like(mask_bool)
+            truth_mask += mask_bool # ground truth
+            truth_mask = ~truth_mask
+            truth_mask = truth_mask.astype(np.int)
+            truth_labels = {0: "Lesion"}
 
-                mask_data = np.zeros_like(pred_bool.squeeze()).astype(np.int)
-                mask_data += 1 * pred_bool & mask_bool # true positives
-                mask_data += 2 * (~pred_bool & mask_bool) # false negatives 
-                mask_data += 3 * (pred_bool & ~mask_bool) # false positives
-
-                class_labels = {
-                    1: "True Positive",
-                    2: "False Negative",
-                    3: "False Positive"
-                }
-
-                truth_mask = np.zeros_like(mask_bool)
-                truth_mask += mask_bool # ground truth
-                truth_mask = ~truth_mask
-                truth_mask = truth_mask.astype(np.int)
-                truth_labels = {0: "Lesion"}
-
-                image = np.expand_dims(ct_slice.squeeze(), axis=-1)
-                mask_img = wandb.Image(image, masks={
-                  "predictions": {
-                      "mask_data": mask_data,
-                      "class_labels": class_labels
-                  },
-                  "groud_truth": {
-                      "mask_data": truth_mask,
-                      "class_labels": truth_labels
-                  }
-                })
-                mask_list.append(mask_img)
+            image = ct_slice#np.expand_dims(ct_slice.squeeze(), axis=-1)
+            mask_img = wandb.Image(image, masks={
+              "predictions": {
+                  "mask_data": mask_data,
+                  "class_labels": class_labels
+              },
+              "groud_truth": {
+                  "mask_data": truth_mask,
+                  "class_labels": truth_labels
+              }
+            })
+            mask_list.append(mask_img)
         wandb.log({f"predictions_{mode_str}": mask_list},
                   step=self.total_training_samples_count)
 

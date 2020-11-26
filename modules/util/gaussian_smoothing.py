@@ -70,5 +70,6 @@ class GaussianSmoothing(nn.Module):
         Returns:
             filtered (torch.Tensor): Filtered output.
         """
+        input = F.pad(input, (1,1,1,1), mode="replicate")
         return self.conv(input, weight=self.weight, groups=self.groups)
 

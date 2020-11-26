@@ -127,6 +127,9 @@ class Ct:
         ct_chunk = self.ct_a[tuple(slice_list)]
         pos_chunk = self.mask[tuple(slice_list)]
 
+        assert ct_chunk.shape == tuple(width_irc) \
+            and pos_chunk.shape == tuple(width_irc)
+
         return ct_chunk, pos_chunk, center_irc
 
 
