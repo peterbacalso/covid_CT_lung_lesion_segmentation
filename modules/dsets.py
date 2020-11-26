@@ -44,7 +44,7 @@ class Ct:
         assert 'ct' in ct_paths[0]
 
         ct = nib.load(ct_paths[0])
-        self.hu = ct.get_fdata().T
+        self.ct_a = ct.get_fdata().T
         self.affine = ct.affine
 
         self.mask = None
@@ -75,7 +75,7 @@ class Ct:
         properties = regionprops(lesion_labels)
 
         center_irc_list = ndimage.center_of_mass(
-            self.hu.clip(-1000,1000) + 1001, # function needs +'ve input
+            self.ct_a.clip(-1000,1000) + 1001, # function needs +'ve input
             labels = lesion_labels,
             index=np.arange(1,lesion_count+1))
         lesion_cols = ['uid', 'coordI', 'coordR', 'coordC', 
@@ -109,8 +109,8 @@ class Ct:
             start_idx = int(round(center_val - width_irc[axis]/2))
             end_idx = int(round(start_idx + width_irc[axis]))
 
-            assert width_irc[axis] <= self.hu.shape[axis], repr(f'width at axis {axis} is larger than the ct')
-            assert center_val > 0 and center_val < self.hu.shape[axis], \
+            assert width_irc[axis] <= self.ct_a.shape[axis], repr(f'width at axis {axis} is larger than the ct')
+            assert center_val > 0 and center_val < self.ct_a.shape[axis], \
                 repr([self.uid, center_irc, axis, width_irc])
 
             # shift if coord is at the border of the axis
@@ -118,21 +118,21 @@ class Ct:
                 start_idx = 0
                 end_idx = width_irc[axis]
 
-            if end_idx > self.hu.shape[axis]:
-                end_idx = self.hu.shape[axis]
-                start_idx = self.hu.shape[axis] - width_irc[axis]
+            if end_idx > self.ct_a.shape[axis]:
+                end_idx = self.ct_a.shape[axis]
+                start_idx = self.ct_a.shape[axis] - width_irc[axis]
 
             slice_list.append(slice(start_idx, end_idx))
 
-        hu_chunk = self.hu[tuple(slice_list)]
+        ct_chunk = self.ct_a[tuple(slice_list)]
         pos_chunk = self.mask[tuple(slice_list)]
 
-        return hu_chunk, pos_chunk, center_irc
+        return ct_chunk, pos_chunk, center_irc
 
 
 @functools.lru_cache(1)
 def get_coords_dict():
-    coords = pd.read_feather('metadata/df_coords_debias.fth')
+    coords = pd.read_feather('metadata/df_rand_coords.fth')
     coords_dict = {}
 
     for _, coord in coords.iterrows():
@@ -147,23 +147,26 @@ def get_ct(uid, dataset_path=None):
 @raw_cache.memoize(typed=True)
 def get_raw_coord(uid, center_irc, width_irc): 
     ct = get_ct(uid)
-    hu_chunk, pos_chunk, center_irc = ct.get_raw_coord(center_irc, width_irc)
-    return hu_chunk, pos_chunk, center_irc
+    ct_chunk, pos_chunk, center_irc = ct.get_raw_coord(center_irc, width_irc)
+    return ct_chunk, pos_chunk, center_irc
 
 @raw_cache.memoize(typed=True)
 def get_ct_index_info(uid):
     ct = get_ct(uid)
-    return int(ct.hu.shape[0]), ct.positive_indices
+    return int(ct.ct_a.shape[0]), ct.positive_indices
 
 class Covid2dSegmentationDataset(Dataset):
 
-    def __init__(self, uid=None, is_valid=None, splitter=None, 
-                 width_irc=(7,60,60), is_full_ct=False, window=None):
+    def __init__(self, uid=None, is_valid=None, splitter=None, shuffle=True,
+                 width_irc=(15,192,192), is_full_ct=False, window=None):
 
         if uid:
             self.uid_list = [uid]
         else:
             self.uid_list = sorted(get_coords_dict().keys())
+
+        if shuffle:
+            random.shuffle(self.uid_list)
 
         if is_valid:
             assert splitter
@@ -188,7 +191,7 @@ class Covid2dSegmentationDataset(Dataset):
         self.context_slice_count = self.width_irc[0] // 2
 
         uid_set = set(self.uid_list)
-        self.coords = pd.read_feather('metadata/df_coords_debias.fth')
+        self.coords = pd.read_feather('metadata/df_rand_coords.fth')
         self.coords.sort_values(by='uid',inplace=True)
         self.coords = self.coords[self.coords.uid.isin(uid_set)]
 
@@ -211,22 +214,22 @@ class Covid2dSegmentationDataset(Dataset):
 
     def getitem_fullslice(self, uid, slice_idx):
         ct = get_ct(uid)
-        hu_slice = torch.zeros((self.context_slice_count*2+1, 512, 512))
+        ct_slice = torch.zeros((self.context_slice_count*2+1, 512, 512))
 
         start_idx = slice_idx - self.context_slice_count
         end_idx = slice_idx + self.context_slice_count + 1
         for i, context_idx in enumerate(range(start_idx, end_idx)):
             context_idx = max(context_idx,0)
-            context_idx = min(context_idx, ct.hu.shape[0]-1)
-            hu_slice[i] = torch.from_numpy(ct.hu[context_idx].astype(np.float32))
-        hu_slice = window_image(hu_slice, self.window)
+            context_idx = min(context_idx, ct.ct_a.shape[0]-1)
+            ct_slice[i] = torch.from_numpy(ct.ct_a[context_idx].astype(np.float32))
+        ct_slice = window_image(ct_slice, self.window)
 
         if ct.mask is not None:
             mask_slice = torch.from_numpy(ct.mask[slice_idx]).unsqueeze(0)
         else:
-            mask_slice = torch.zeros_like(hu_slice).unsqueeze(0)
+            mask_slice = torch.zeros_like(ct_slice).unsqueeze(0)
 
-        return hu_slice, mask_slice, uid, slice_idx
+        return ct_slice, mask_slice, uid, slice_idx
 
 class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
@@ -248,36 +251,40 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         return self.getitem_cropslice(coord)
 
     def getitem_cropslice(self, coord):
-        hu_chunk, mask_chunk, center_irc = get_raw_coord(
+        ct_chunk, mask_chunk, center_irc = get_raw_coord(
             coord.uid,
             tuple(coord[['coordI', 'coordR', 'coordC']]),
             self.width_irc)
 
         mask = mask_chunk[self.context_slice_count:self.context_slice_count+1]
 
-        max_row_offset = int(math.ceil(self.width_irc[1]*.1))
-        max_col_offset = int(math.ceil(self.width_irc[2]*.1))
+        '''
+        max_row_offset = int(math.ceil(self.width_irc[1]*.33))
+        max_col_offset = int(math.ceil(self.width_irc[2]*.33))
         row_offset = random.randrange(0, max_row_offset)
         col_offset = random.randrange(0, max_col_offset)
         row_width = self.width_irc[1] - max_row_offset
         col_width = self.width_irc[2] - max_row_offset
+        '''
 
-        hu_chunk = torch.from_numpy(hu_chunk[:, row_offset:row_offset+row_width, 
-                col_offset:col_offset+col_width]).to(torch.float32)
-        hu_chunk = window_image(hu_chunk, self.window)
+        #hu_chunk = torch.from_numpy(hu_chunk[:, row_offset:row_offset+row_width, 
+        #        col_offset:col_offset+col_width]).to(torch.float32)
+        ct_chunk = torch.from_numpy(ct_chunk).to(torch.float32)
+        ct_chunk = window_image(ct_chunk, self.window)
 
-        mask = torch.from_numpy(mask[:, row_offset:row_offset+row_width, 
-                col_offset:col_offset+col_width]).to(torch.float32)
+        #mask = torch.from_numpy(mask[:, row_offset:row_offset+row_width, 
+        #        col_offset:col_offset+col_width]).to(torch.float32)
+        mask = torch.from_numpy(mask).to(torch.float32)
 
-        return hu_chunk, mask, coord.uid, coord.coordI
+        return ct_chunk, mask, coord.uid, coord.coordI
 
 
 class PrepcacheCovidDataset(Dataset):
-    def __init__(self, width_irc, *args, **kwargs):
+    def __init__(self, width_irc=(15,192,192), *args, **kwargs):
         super().__init__(*args, **kwargs)
 
         self.width_irc = width_irc
-        self.coords = pd.read_feather('metadata/df_coords_debias.fth')
+        self.coords = pd.read_feather('metadata/df_rand_coords.fth')
 
         self.seen_set = set()
         self.coords.sort_values(by='uid', inplace=True)

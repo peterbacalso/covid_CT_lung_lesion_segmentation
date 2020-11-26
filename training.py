@@ -17,9 +17,11 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 
 # local imports
+from modules.util import loss_funcs
 from modules.model import UNetWrapper
 from modules.util.logconf import logging
 from modules.util.util import list_stride_splitter
+from modules.util.gaussian_smoothing import GaussianSmoothing
 from modules.util.augmentation import SegmentationAugmentation
 from modules.dsets import (TrainingCovid2dSegmentationDataset, 
                           Covid2dSegmentationDataset, get_ct)
@@ -148,6 +150,18 @@ class CovidSegmentationTrainingApp:
             default=None,
             type=str
         )
+        parser.add_argument(
+            '--loss-func',
+            help='Specify loss function to optimize: one of (dice_loss, tversky_loss, focal_tversky_loss)',
+            default='dice_loss',
+            type=str
+        )
+        parser.add_argument(
+            '--focal',
+            help='Enable focal loss.',
+            action='store_true',
+            default=False
+        )
 
         self.cli_args = parser.parse_args(argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
@@ -182,7 +196,7 @@ class CovidSegmentationTrainingApp:
             self.augmentation_dict['noise'] = 25.0
 
         self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
-        self.seg_model, self.aug_model = self.init_model()
+        self.seg_model, self.aug_model, self.gaus_model = self.init_model()
         wandb.watch(self.seg_model) # apparently magic
         self.optim = self.init_optim()
         self.train_dl, self.valid_dl = self.init_dl()
@@ -203,16 +217,19 @@ class CovidSegmentationTrainingApp:
             up_mode='upconv')
 
         aug_model = SegmentationAugmentation(**self.augmentation_dict)
+        gaus_model = GaussianSmoothing(channels=self.width_irc[0])
 
         if self.use_cuda:
             log.info("Using CUDA; {} devices.".format(torch.cuda.device_count()))
             if torch.cuda.device_count() > 1:
                 seg_model = nn.DataParallel(seg_model)
                 aug_model = nn.DataParallel(aug_model)
+                gaus_model = nn.DataParallel(gaus_model)
             seg_model = seg_model.to(self.device)
             aug_model = aug_model.to(self.device)
+            gaus_model = gaus_model.to(self.device)
 
-        return seg_model, aug_model
+        return seg_model, aug_model, gaus_model
 
     def init_optim(self, lr=1e-3, momentum=.99):
         #return SGD(self.seg_model.parameters(), lr=lr, 
@@ -220,18 +237,11 @@ class CovidSegmentationTrainingApp:
         return Adam(self.seg_model.parameters())
 
     def init_loss_func(self):
-        def dice_loss(pred_g, label_g, epsilon=1):
-            dice_correct = (pred_g * label_g).sum(dim=[1,2,3])
-            dice_label_g = label_g.sum(dim=[1,2,3])
-            dice_pred_g = pred_g.sum(dim=[1,2,3])
-
-            dice_ratio = (2 * dice_correct + epsilon) \
-                / (dice_label_g + dice_pred_g + epsilon)
-            return 1 - dice_ratio
-        return dice_loss
+        loss_func = getattr(loss_funcs, self.cli_args.loss_func)
+        return loss_func
 
     def init_dl(self):
-        splitter = partial(list_stride_splitter, val_stride=10)
+        splitter = partial(list_stride_splitter, val_stride=5)
 
         train_ds = TrainingCovid2dSegmentationDataset(
             steps_per_epoch=self.cli_args.steps_per_epoch,
@@ -257,7 +267,7 @@ class CovidSegmentationTrainingApp:
 
         valid_dl = DataLoader(
             valid_ds,
-            batch_size=batch_size,
+            batch_size=batch_size//2,
             num_workers=self.cli_args.num_workers,
             pin_memory=self.use_cuda)
 
@@ -268,18 +278,20 @@ class CovidSegmentationTrainingApp:
                           steps_per_epoch=len(self.train_dl),
                           epochs=self.cli_args.epochs)
 
-    def batch_loss(self, idx, batch, batch_size, metrics, thresh=.5):
-        hu, mask, uid_list, slice_idx_list = batch
+    def batch_loss(self, idx, batch, batch_size, metrics, thresh=.5, get_sample=False):
+        ct_a, mask, uid_list, slice_idx_list = batch
 
-        hu_g = hu.to(self.device, non_blocking=True)
+        ct_g = ct_a.to(self.device, non_blocking=True)
         mask_g = mask.to(self.device, non_blocking=True)
 
         if self.seg_model.training and self.augmentation_dict:
-            hu_g, mask_g = self.aug_model(hu_g, mask_g)
+            ct_g, mask_g = self.aug_model(ct_g, mask_g)
+            if np.random.choice(2,1)[0]:
+                ct_g = self.gaus_model(ct_g)
 
-        pred_g = self.seg_model(hu_g)
+        pred_g = self.seg_model(ct_g)
 
-        dice_loss = self.loss_func(pred_g, mask_g)
+        loss = self.loss_func(pred_g, mask_g)
         fine_loss = self.loss_func(pred_g*mask_g, mask_g)
 
         start_idx = idx * batch_size
@@ -293,7 +305,7 @@ class CovidSegmentationTrainingApp:
             fn = (~pred_bool * mask_bool).sum(dim=[1,2,3])
             fp = (pred_bool * ~mask_bool).sum(dim=[1,2,3])
 
-            metrics[METRICS_LOSS_IDX, start_idx:end_idx] = dice_loss
+            metrics[METRICS_LOSS_IDX, start_idx:end_idx] = loss
             metrics[METRICS_TP_IDX, start_idx:end_idx] = tp 
             metrics[METRICS_FN_IDX, start_idx:end_idx] = fn
             metrics[METRICS_FP_IDX, start_idx:end_idx] = fp 
@@ -302,7 +314,13 @@ class CovidSegmentationTrainingApp:
 
         # we want to maximize recall so we give the false negatives 
         # a larger impact on the loss (recall_priority times more)
-        return dice_loss.mean() + (fine_loss.mean() * self.cli_args.recall_priority)
+        loss = loss.mean() + (fine_loss.mean() * self.cli_args.recall_priority)
+        if self.cli_args.focal:
+            loss = torch.pow(loss,.75)
+        if get_sample:
+            return loss, ct_g.detach().cpu(), \
+                mask_g.detach().cpu(), pred_g.detach().cpu()
+        return loss, None, None, None
 
 
     def one_epoch(self, epoch, dl, mb, train=True):
@@ -319,15 +337,19 @@ class CovidSegmentationTrainingApp:
         for i, batch in pb:
             if train:
                 self.optim.zero_grad()
-                loss = self.batch_loss(i, batch, dl.batch_size, metrics)
+                loss, ct_t, mask_t, pred_t = self.batch_loss(
+                    i, batch, dl.batch_size, metrics, 
+                    get_sample=(i==len(dl)-1))
                 loss.backward()
                 self.optim.step()
                 self.scheduler.step()
             else:
                 with torch.no_grad():
-                    self.batch_loss(i, batch, dl.batch_size, metrics)
+                    _, ct_t, mask_t, pred_t = self.batch_loss(
+                        i, batch, dl.batch_size, metrics, 
+                        get_sample=(i==len(dl)-1))
 
-        return metrics.to('cpu')
+        return metrics.to('cpu'), ct_t, mask_t, pred_t
 
     def log_metrics(self, epoch, mode_str, metrics):
         log.info("E{} {}".format(
@@ -381,10 +403,10 @@ class CovidSegmentationTrainingApp:
 
         return metrics_dict
 
-    def log_images(self, epoch, mode_str, dl, thresh=.5):
+    def log_images(self, epoch, mode_str, dl, ct_t, mask_t, pred_t, thresh=.5):
         self.seg_model.eval()
         uid_list = dl.dataset.coords.groupby(by='uid').first()\
-            .reset_index().sort_values(by='uid')[:8]
+            .reset_index().sort_values(by='uid')[:4]
         mask_list = []
         for i, row in uid_list.iterrows():
             uid, *_ = row
@@ -394,24 +416,24 @@ class CovidSegmentationTrainingApp:
                 if mode_str=='trn':
                     ct_slice = dl.dataset.getitem_cropslice(row)
                 else:
-                    ct_idx = slice_idx * (ct.hu.shape[0] - 1) // 5
+                    ct_idx = slice_idx * (ct.ct_a.shape[0] - 1) // 5
                     ct_slice = dl.dataset.getitem_fullslice(uid, ct_idx)
 
-                hu, mask, *_ = ct_slice 
-                hu_g = hu.to(self.device).unsqueeze(0)
+                ct_a, mask, *_ = ct_slice 
+                ct_g = ct_a.to(self.device).unsqueeze(0)
                 mask_g = mask.to(self.device).unsqueeze(0)
 
-                pred_g = self.seg_model(hu_g)[0]
+                pred_g = self.seg_model(ct_g)[0]
                 pred_bool = pred_g.cpu().detach().numpy()[0] > thresh 
                 mask_bool = mask_g.cpu().numpy()[0][0] > thresh
 
                 # normalize range 
-                hu[:-1,:,:] /= 2000 # range -0.5 to 0.5
-                hu[:-1,:,:] += .5   # range 0 to 1
+                ct_a[:-1,:,:] /= 2000 # range -0.5 to 0.5
+                ct_a[:-1,:,:] += .5   # range 0 to 1
                 if mode_str == 'trn':
-                    hu_slice = hu[slice_idx % hu.shape[0]].numpy()
+                    ct_slice = ct_a[slice_idx % ct_a.shape[0]].numpy()
                 else:
-                    hu_slice = hu[dl.dataset.context_slice_count].numpy()
+                    ct_slice = ct_a[dl.dataset.context_slice_count].numpy()
 
                 mask_data = np.zeros_like(pred_bool.squeeze()).astype(np.int)
                 mask_data += 1 * pred_bool & mask_bool # true positives
@@ -430,7 +452,7 @@ class CovidSegmentationTrainingApp:
                 truth_mask = truth_mask.astype(np.int)
                 truth_labels = {0: "Lesion"}
 
-                image = np.expand_dims(hu_slice.squeeze(), axis=-1)
+                image = np.expand_dims(ct_slice.squeeze(), axis=-1)
                 mask_img = wandb.Image(image, masks={
                   "predictions": {
                       "mask_data": mask_data,
@@ -493,16 +515,21 @@ class CovidSegmentationTrainingApp:
                   'pr_val/precision', 'pr_val/recall', 'pr_val/f1_score'], 
                  table=True)
         for epoch in mb:
-            trn_metrics = self.one_epoch(epoch, dl=self.train_dl, mb=mb)
+            trn_metrics, ct_t_trn, mask_t_trn, pred_t_trn = self.one_epoch(
+                epoch, dl=self.train_dl, mb=mb)
             trn_metrics_dict = self.log_metrics(epoch, mode_str='trn',
                                                   metrics=trn_metrics)
             if epoch == 1 or epoch % self.cli_args.val_cadence== 0:
-                val_metrics = self.one_epoch(epoch, dl=self.valid_dl, 
-                                             mb=mb, train=False)
+                val_metrics, ct_t_val, mask_t_val, pred_t_val = self.one_epoch(
+                    epoch, dl=self.valid_dl, mb=mb, train=False)
                 val_metrics_dict = self.log_metrics(epoch, mode_str='val',
                                                     metrics=val_metrics)
-                self.log_images(epoch, mode_str='trn', dl=self.train_dl)
-                self.log_images(epoch, mode_str='val', dl=self.valid_dl)
+                self.log_images(epoch, mode_str='trn', dl=self.train_dl,
+                                ct_t=ct_t_trn, mask_t=mask_t_trn, 
+                                pred_t=pred_t_trn)
+                self.log_images(epoch, mode_str='val', dl=self.valid_dl,
+                                ct_t=ct_t_val, mask_t=mask_t_val, 
+                                pred_t=pred_t_val)
                 best_score = max(best_score, val_metrics_dict['pr_val/f1_score'])
                 self.save_model(epoch, val_metrics_dict['pr_val/f1_score']==best_score)
                 mb.write([
