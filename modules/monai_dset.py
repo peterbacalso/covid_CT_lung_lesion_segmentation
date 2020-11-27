@@ -74,6 +74,7 @@ def get_ds(data_folder=".", width_cri=(192,192,16),
     images = sorted(glob.glob(f"{str(data_path)}/*_ct.nii.gz"))
     labels = sorted(glob.glob(f"{str(data_path)}/*_seg.nii.gz"))
     log.info(f"training: image/label ({len(images)}) folder: {data_folder}")
+    images = images[:11]
 
     keys = ("image", "label")
     if splitter is None:

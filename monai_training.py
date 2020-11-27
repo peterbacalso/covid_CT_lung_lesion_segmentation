@@ -18,10 +18,11 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 
 # local imports
+from modules.monai_dset import get_ds 
 from modules.model import UNet3dWrapper
 from modules.util.logconf import logging
 from modules.util.util import list_stride_splitter
-from modules.monai_dset import get_ds 
+from modules.util.augmentation import SegmentationAugmentation
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -130,10 +131,10 @@ class CovidSegmentationTrainingApp:
             action='store_true',
             default=False
         )
-        parser.add_argument('--width-irc',
+        parser.add_argument('--width-cri',
             nargs='+',
             help='Pass 3 values: Column, Row, Index',
-            default=[16,192,192]
+            default=[192,192,16]
         )
         parser.add_argument('--data-path',
             help='dataset path for training',
@@ -170,7 +171,7 @@ class CovidSegmentationTrainingApp:
         if self.cli_args.augmented or self.cli_args.augment_noise:
             self.augmentation_dict['noise'] = .01
 
-        self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
+        self.width_cri = tuple([int(axis) for axis in self.cli_args.width_cri])
         self.seg_model, self.aug_model = self.init_model()
         wandb.watch(self.seg_model) # apparently magic
         self.optim = self.init_optim()
@@ -224,7 +225,7 @@ class CovidSegmentationTrainingApp:
         splitter = partial(list_stride_splitter, val_stride=5)
         data_path = self.cli_args.data_path
         trn_ds, val_ds = get_ds(data_folder=data_path, 
-                                width_irc=self.width_irc, 
+                                width_cri=self.width_cri, 
                                 splitter=splitter)
 
         batch_size = self.cli_args.batch_size
@@ -252,11 +253,11 @@ class CovidSegmentationTrainingApp:
                           epochs=self.cli_args.epochs)
 
     def init_sliding_window(self):
-        return monai.inferers.SlidingWindowInferer(roi_size=self.width_irc, 
+        return monai.inferers.SlidingWindowInferer(roi_size=self.width_cri, 
                                                    sw_batch_size=1, overlap=.5)
 
     def batch_loss(self, idx, batch, batch_size, metrics, 
-                   thresh=.5, log_image=False):
+                   thresh=.5, is_train=True, log_image=False):
         ct_t, mask_t = batch['image'], batch['label']
 
         ct_g = ct_t.to(self.device, non_blocking=True)
@@ -270,8 +271,12 @@ class CovidSegmentationTrainingApp:
         dice_loss = self.loss_func(pred_g, mask_g)
         fine_loss = self.loss_func(pred_g*mask_g, mask_g)
 
-        start_idx = idx * batch_size * 3
-        end_idx = start_idx + batch_size * 3
+        if is_train:
+            start_idx = idx * batch_size * 2
+            end_idx = start_idx + batch_size * 2
+        else:
+            start_idx = idx * batch_size
+            end_idx = start_idx + batch_size
 
         with torch.no_grad():
             pred_bool = pred_g > thresh
@@ -314,6 +319,7 @@ class CovidSegmentationTrainingApp:
                 self.optim.zero_grad()
                 loss, ct_t, mask_t, pred_t = self.batch_loss(
                     i, batch, dl.batch_size, metrics, 
+                    is_train=train,
                     log_image=(i==len(dl)-1))
                 loss.backward()
                 self.optim.step()
@@ -322,8 +328,8 @@ class CovidSegmentationTrainingApp:
                 with torch.no_grad():
                     _, ct_t, mask_t, pred_t = self.batch_loss(
                         i, batch, dl.batch_size, metrics, 
+                        is_train=train,
                         log_image=(i==len(dl)-1))
-                    self.batch_loss(i, batch, dl.batch_size, metrics)
 
         return metrics.to('cpu'), ct_t, mask_t, pred_t
 
