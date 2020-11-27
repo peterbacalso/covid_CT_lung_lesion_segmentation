@@ -94,10 +94,46 @@ class CovidSegmentationTrainingApp:
             default='zero',
             type=str
         )
-        parser.add_argument('--width-cri',
+        parser.add_argument(
+            '--augment-flip',
+            help='Augment the training data by randomly flipping the data left-right, up-down, and front-back.',
+            action='store_true',
+            default=False
+        )
+        parser.add_argument(
+            '--augment-offset',
+            help='Augment the training data by randomly offsetting the data slightly along the X, Y, and Z axes.',
+            action='store_true',
+            default=False
+        )
+        parser.add_argument(
+            '--augment-scale',
+            help='Augment the training data by randomly increasing or decreasing the size of the candidate.',
+            action='store_true',
+            default=False
+        )
+        parser.add_argument(
+            '--augment-rotate',
+            help='Augment the training data by randomly rotating the data around the head-foot axis.',
+            action='store_true',
+            default=False
+        )
+        parser.add_argument(
+            '--augment-noise',
+            help='Augment the training data by randomly adding noise to the data.',
+            action='store_true',
+            default=False
+        )
+        parser.add_argument(
+            '--augmented',
+            help='Augment the training data.',
+            action='store_true',
+            default=False
+        )
+        parser.add_argument('--width-irc',
             nargs='+',
             help='Pass 3 values: Column, Row, Index',
-            default=[192,192,16]
+            default=[16,192,192]
         )
         parser.add_argument('--data-path',
             help='dataset path for training',
@@ -122,8 +158,20 @@ class CovidSegmentationTrainingApp:
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
 
-        self.width_cri = tuple([int(axis) for axis in self.cli_args.width_cri])
-        self.seg_model = self.init_model()
+        self.augmentation_dict = {}
+        if self.cli_args.augmented or self.cli_args.augment_flip:
+            self.augmentation_dict['flip'] = True
+        if self.cli_args.augmented or self.cli_args.augment_offset:
+            self.augmentation_dict['offset'] = .2
+        if self.cli_args.augmented or self.cli_args.augment_scale:
+            self.augmentation_dict['scale'] = .1
+        if self.cli_args.augmented or self.cli_args.augment_rotate:
+            self.augmentation_dict['rotate'] = True
+        if self.cli_args.augmented or self.cli_args.augment_noise:
+            self.augmentation_dict['noise'] = .01
+
+        self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
+        self.seg_model, self.aug_model = self.init_model()
         wandb.watch(self.seg_model) # apparently magic
         self.optim = self.init_optim()
         self.trn_dl, self.val_dl = self.init_dl()
@@ -144,14 +192,17 @@ class CovidSegmentationTrainingApp:
             batch_norm=True,
             up_mode='upconv')
 
+        aug_model = SegmentationAugmentation(**self.augmentation_dict)
 
         if self.use_cuda:
             log.info("Using CUDA; {} devices.".format(torch.cuda.device_count()))
             if torch.cuda.device_count() > 1:
                 seg_model = nn.DataParallel(seg_model)
+                aug_model = nn.DataParallel(aug_model)
             seg_model = seg_model.to(self.device)
+            aug_model = aug_model.to(self.device)
 
-        return seg_model
+        return seg_model, aug_model
 
     def init_optim(self, lr=1e-3, momentum=.99):
         return SGD(self.seg_model.parameters(), lr=lr, 
@@ -170,10 +221,10 @@ class CovidSegmentationTrainingApp:
         return dice_loss
 
     def init_dl(self):
-        splitter = partial(list_stride_splitter, val_stride=10)
+        splitter = partial(list_stride_splitter, val_stride=5)
         data_path = self.cli_args.data_path
         trn_ds, val_ds = get_ds(data_folder=data_path, 
-                                width_cri=self.width_cri, 
+                                width_irc=self.width_irc, 
                                 splitter=splitter)
 
         batch_size = self.cli_args.batch_size
@@ -201,7 +252,7 @@ class CovidSegmentationTrainingApp:
                           epochs=self.cli_args.epochs)
 
     def init_sliding_window(self):
-        return monai.inferers.SlidingWindowInferer(roi_size=self.width_cri, 
+        return monai.inferers.SlidingWindowInferer(roi_size=self.width_irc, 
                                                    sw_batch_size=1, overlap=.5)
 
     def batch_loss(self, idx, batch, batch_size, metrics, 
@@ -211,8 +262,8 @@ class CovidSegmentationTrainingApp:
         ct_g = ct_t.to(self.device, non_blocking=True)
         mask_g = mask_t.to(self.device, non_blocking=True)
 
-        #if self.seg_model.training and self.augmentation_dict:
-        #    hu_g, mask_g = self.aug_model(hu_g, mask_g)
+        if self.seg_model.training and self.augmentation_dict:
+            ct_g, mask_g = self.aug_model(ct_g, mask_g)
 
         pred_g = self.sliding_window(ct_g, self.seg_model)
 
@@ -251,8 +302,8 @@ class CovidSegmentationTrainingApp:
     def one_epoch(self, epoch, dl, mb, train=True):
         if train:
             self.seg_model.train()
-            self.total_training_samples_count += (len(dl.dataset)*3)
-            metrics = torch.zeros(METRICS_SIZE, len(dl.dataset)*3, device=self.device)
+            self.total_training_samples_count += (len(dl.dataset)*2)
+            metrics = torch.zeros(METRICS_SIZE, len(dl.dataset)*2, device=self.device)
         else:
             self.seg_model.eval()
             metrics = torch.zeros(METRICS_SIZE, len(dl.dataset), device=self.device)

@@ -1,7 +1,7 @@
 playground.ipynb
 test_everything.ipynb
 SampleSubmission/
-*.swp
+*.sw*
 data/
 saved-models/
 wandb/

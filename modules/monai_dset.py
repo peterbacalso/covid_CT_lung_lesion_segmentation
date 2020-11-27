@@ -52,11 +52,11 @@ def get_xforms(mode="trn", keys=("image", "label"),
                         mode=("bilinear", "nearest"),
                         as_tensor_output=False,
                     ),
-            RandCropByPosNegLabeld(keys, label_key=keys[1], spatial_size=width_cri, num_samples=3),
-            RandGaussianNoised(keys[0], prob=0.15, std=0.01),
-            RandFlipd(keys, spatial_axis=0, prob=0.5),
-            RandFlipd(keys, spatial_axis=1, prob=0.5),
-            RandFlipd(keys, spatial_axis=2, prob=0.5),
+            RandCropByPosNegLabeld(keys, label_key=keys[1], spatial_size=width_cri, num_samples=2),
+            #RandGaussianNoised(keys[0], prob=0.15, std=0.01),
+            #RandFlipd(keys, spatial_axis=0, prob=0.5),
+            #RandFlipd(keys, spatial_axis=1, prob=0.5),
+            #RandFlipd(keys, spatial_axis=2, prob=0.5),
         ])
         dtype = (np.float32, np.uint8)
     if mode == "val":
