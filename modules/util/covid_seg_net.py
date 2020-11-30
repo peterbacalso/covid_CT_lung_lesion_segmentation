@@ -123,6 +123,7 @@ class ContrastEnhancementBranch(nn.Module):
     def forward(self, fv1):
         gap = F.avg_pool3d(fv1, kernel_size=fv1.shape[-3:]).squeeze()
         x = self.lin1(gap)
+        x = torch.sigmoid(x)
         x = self.lin2(x)
         x = torch.sigmoid(x)
         fg = x.repeat(1, self.in_size)[:,:,None,None,None] # expansion

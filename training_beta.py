@@ -18,21 +18,24 @@ from torch.utils.data import DataLoader
 from torch.optim.lr_scheduler import OneCycleLR
 
 # local imports
-from modules.covid_seg_net import CovidSegNet 
 from modules.util.logconf import logging
+from modules.model import CovidSegNetWrapper
 from modules.util.util import list_stride_splitter
 from modules.util.augmentation import SegmentationAugmentation
+from modules.util.loss_funcs import dice_loss, cross_entropy_loss
 from modules.dsets import (TrainingCovid2dSegmentationDataset, collate_fn,
                           Covid2dSegmentationDataset, get_ct)
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-METRICS_SIZE = 4
+METRICS_SIZE = 6
 METRICS_LOSS_IDX = 0
 METRICS_TP_IDX = 1
 METRICS_FN_IDX = 2
 METRICS_FP_IDX = 3
+METRICS_CE_LOSS_IDX = 4
+METRICS_DICE_LOSS_IDX = 5
 
 class CovidSegmentationTrainingApp:
 
@@ -70,12 +73,6 @@ class CovidSegmentationTrainingApp:
             '--val-cadence',
             help='Run validation at every val-cadence-th epoch. Validation will always run at epoch 1',
             default=1,
-            type=int
-        )
-        parser.add_argument(
-            '--recall-priority',
-            help='Prioritize recall over precision by (int) times more',
-            default=0,
             type=int
         )
         parser.add_argument(
@@ -203,7 +200,7 @@ class CovidSegmentationTrainingApp:
         self.optim = self.init_optim()
 
     def init_model(self):
-        seg_model = CovidSegNet(
+        seg_model = CovidSegNetWrapper(
             in_channels=1,
             n_classes=1,
             depth=self.cli_args.depth,
@@ -228,15 +225,13 @@ class CovidSegmentationTrainingApp:
         return Adam(self.seg_model.parameters())
 
     def init_loss_func(self):
-        def dice_loss(pred_g, label_g, epsilon=1):
-            dice_correct = (pred_g * label_g).sum(dim=[-4,-3,-2,-1])
-            dice_label_g = label_g.sum(dim=[-4,-3,-2,-1])
-            dice_pred_g = pred_g.sum(dim=[-4,-3,-2,-1])
-
-            dice_ratio = (2 * dice_correct + epsilon) \
-                / (dice_label_g + dice_pred_g + epsilon)
-            return 1 - dice_ratio
-        return dice_loss
+        def loss_func(pred_g, label_g, epsilon=1):
+            ce_loss = cross_entropy_loss(pred_g,
+                                         torch.squeeze(label_g, dim=1).long())
+            d_loss = dice_loss(torch.argmax(pred_g, dim=1, keepdim=True),
+                               label_g)
+            return ce_loss, d_loss
+        return loss_func 
 
     def init_dl(self):
         splitter = partial(list_stride_splitter, val_stride=10)
@@ -297,8 +292,8 @@ class CovidSegmentationTrainingApp:
 
         pred_g = self.sliding_window(ct_g, self.seg_model)
 
-        dice_loss = self.loss_func(pred_g, mask_g)
-        fine_loss = self.loss_func(pred_g*mask_g, mask_g)
+        ce_loss, dice_loss = self.loss_func(pred_g, mask_g)
+        dice_ce_loss = (ce_loss + dice_loss) * .5
 
         if is_train:
             start_idx = idx * batch_size * 3
@@ -315,16 +310,16 @@ class CovidSegmentationTrainingApp:
             fn = (~pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
             fp = (pred_bool * ~mask_bool).sum(dim=[-4,-3,-2,-1])
 
-            metrics[METRICS_LOSS_IDX, start_idx:end_idx] = dice_loss
+            metrics[METRICS_LOSS_IDX, start_idx:end_idx] = dice_ce_loss
             metrics[METRICS_TP_IDX, start_idx:end_idx] = tp 
             metrics[METRICS_FN_IDX, start_idx:end_idx] = fn
             metrics[METRICS_FP_IDX, start_idx:end_idx] = fp 
+            metrics[METRICS_CE_LOSS_IDX, start_idx:end_idx] = ce_loss
+            metrics[METRICS_DICE_LOSS_IDX, start_idx:end_idx] = dice_loss
 
         self.batch_count += 1
 
-        # we want to maximize recall so we give the false negatives 
-        # a larger impact on the loss (recall_priority times more)
-        loss = dice_loss.mean() + (fine_loss.mean() * self.cli_args.recall_priority)
+        loss = dice_ce_loss.mean()
         if get_sample:
             return loss, ct_g.detach().cpu(), \
                 mask_g.detach().cpu(), pred_g.detach().cpu()
@@ -379,6 +374,8 @@ class CovidSegmentationTrainingApp:
 
         metrics_dict = {}
         metrics_dict[f'loss/{mode_str}'] = metrics_a[METRICS_LOSS_IDX].mean()
+        metrics_dict[f'dice_loss/{mode_str}'] = metrics_a[METRICS_DICE_LOSS_IDX].mean()
+        metrics_dict[f'ce_loss/{mode_str}'] = metrics_a[METRICS_CE_LOSS_IDX].mean()
 
         metrics_dict[f'metrics_{mode_str}/miss_rate'] = \
             sum_a[METRICS_FN_IDX] / (mask_voxel_count or 1)
@@ -397,6 +394,8 @@ class CovidSegmentationTrainingApp:
         if mode_str=='trn':
             log.info(("E{} {:8} "
                       + "{loss/trn:.4f} loss, "
+                      + "{dice_loss/trn:.4f} dice loss, "
+                      + "{ce_loss/trn:.4f} ce loss, "
                       + "{pr_trn/precision:.4f} precision, "
                       + "{pr_trn/recall:.4f} recall, "
                       + "{pr_trn/f1_score:.4f} f1 score "
@@ -406,6 +405,8 @@ class CovidSegmentationTrainingApp:
         else:
             log.info(("E{} {:8} "
                       + "{loss/val:.4f} loss, "
+                      + "{dice_loss/val:.4f} dice loss, "
+                      + "{ce_loss/val:.4f} ce_loss, "
                       + "{pr_val/precision:.4f} precision, "
                       + "{pr_val/recall:.4f} recall, "
                       + "{pr_val/f1_score:.4f} f1 score "
@@ -521,7 +522,11 @@ class CovidSegmentationTrainingApp:
                 mb.write([
                     epoch,
                     "{:.4f}".format(trn_metrics_dict['loss/trn']),
+                    "{:.4f}".format(trn_metrics_dict['dice_loss/trn']),
+                    "{:.4f}".format(trn_metrics_dict['ce_loss/trn']),
                     "{:.4f}".format(val_metrics_dict['loss/val']),
+                    "{:.4f}".format(val_metrics_dict['dice_loss/val']),
+                    "{:.4f}".format(val_metrics_dict['ce_loss/val']),
                     "{:.4f}".format(val_metrics_dict['metrics_val/miss_rate']),
                     "{:.4f}".format(val_metrics_dict['metrics_val/fp_to_mask_ratio']),
                     "{:.4f}".format(val_metrics_dict['pr_val/precision']),
