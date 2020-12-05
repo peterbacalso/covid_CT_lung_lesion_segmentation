@@ -8,6 +8,7 @@ WindowTuple = namedtuple('WindowInfo', ['width', 'level'])
 
 lung_window = WindowTuple(1500, -600)
 mediastinal_window = WindowTuple(350, 50)
+shifted_lung_window = WindowTuple(1500, -250)
 
 def window_image(img, window_name):
     if window_name is not None:
@@ -15,6 +16,8 @@ def window_image(img, window_name):
             window = lung_window
         elif window_name == 'mediastinal':
             window = mediastinal_window
+        elif window_name == 'shifted_lung':
+            window = shifted_lung_window
         img_min = window.level - window.width//2
         img_max = window.level + window.width//2
     else:

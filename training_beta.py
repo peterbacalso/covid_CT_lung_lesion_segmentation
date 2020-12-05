@@ -78,7 +78,7 @@ class CovidSegmentationTrainingApp:
         parser.add_argument(
             '--depth',
             help='UNet Depth',
-            default=3,
+            default=4,
             type=int
         )
         parser.add_argument(
@@ -129,12 +129,6 @@ class CovidSegmentationTrainingApp:
             action='store_true',
             default=False
         )
-        parser.add_argument(
-            '--pad-type',
-            help='Conv padding: one of (zero, reflect, replicate)',
-            default='zero',
-            type=str
-        )
         parser.add_argument('--width-irc',
             nargs='+',
             help='Pass 3 values: Index, Row, Column',
@@ -142,8 +136,14 @@ class CovidSegmentationTrainingApp:
         )
         parser.add_argument(
             '--ct-window',
-            help='Specify CT window: one of (none, lung, mediastinal, dist)',
+            help='Specify CT window: one of (none, lung, mediastinal, shifted_lung)',
             default=None,
+            type=str
+        )
+        parser.add_argument(
+            '--notes',
+            help='notes to log in wandb',
+            default='',
             type=str
         )
         parser.add_argument('--model-path',
@@ -156,18 +156,20 @@ class CovidSegmentationTrainingApp:
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
 
         if self.cli_args.epochs == 0:
-            wandb.init(project=self.cli_args.project_name, name=self.cli_args.run_name)
+            wandb.init(project=self.cli_args.project_name, 
+                       notes=self.cli_args.notes, name=self.cli_args.run_name)
             raise
         if self.cli_args.run_name is None:
-            wandb.init(project=self.cli_args.project_name, config=self.cli_args)
+            wandb.init(project=self.cli_args.project_name, 
+                       notes=self.cli_args.notes, config=self.cli_args)
         else:
             wandb.init(project=self.cli_args.project_name, 
+                       notes=self.cli_args.notes,
                        config=self.cli_args,
                        name=self.cli_args.run_name)
 
-        assert self.cli_args.pad_type in ('zero', 'reflect', 'replicate'), repr(self.cli_args.pad_type)
         if self.cli_args.ct_window is not None:
-            assert self.cli_args.ct_window in ('lung', 'mediastinal', 'dist')
+            assert self.cli_args.ct_window in ('lung', 'mediastinal', 'shifted_lung')
 
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
@@ -176,20 +178,20 @@ class CovidSegmentationTrainingApp:
         if self.cli_args.augmented or self.cli_args.augment_flip:
             self.augmentation_dict['flip'] = True
         if self.cli_args.augmented or self.cli_args.augment_offset:
-            self.augmentation_dict['offset'] = .3
+            self.augmentation_dict['offset'] = .2
         if self.cli_args.augmented or self.cli_args.augment_scale:
-            self.augmentation_dict['scale'] = .2
+            self.augmentation_dict['scale'] = .1
         if self.cli_args.augmented or self.cli_args.augment_rotate:
             self.augmentation_dict['rotate'] = True
         if self.cli_args.augmented or self.cli_args.augment_noise:
-            self.augmentation_dict['noise'] = 25.0
+            self.augmentation_dict['noise'] = 25.
 
         self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
-        self.seg_model, self.aug_model = self.init_model()
+        #self.seg_model, self.aug_model = self.init_model()
+        self.seg_model = self.init_model()
         wandb.watch(self.seg_model) # apparently magic
         self.train_dl, self.valid_dl = self.init_dl()
-        #self.scheduler = self.init_scheduler()
-        self.loss_func = self.init_loss_func()
+        self.dice_loss, self.ce_loss = self.init_loss_func()
         self.sliding_window = self.init_sliding_window()
         self.total_training_samples_count = 0
         self.batch_count = 0
@@ -198,43 +200,46 @@ class CovidSegmentationTrainingApp:
             self.resume_training()
 
         self.optim = self.init_optim()
+        self.scheduler = self.init_scheduler()
 
     def init_model(self):
         seg_model = CovidSegNetWrapper(
             in_channels=1,
-            n_classes=1,
+            n_classes=2,
             depth=self.cli_args.depth,
             wf=4,
             padding=True)
 
-        aug_model = SegmentationAugmentation(**self.augmentation_dict)
+        #aug_model = SegmentationAugmentation(**self.augmentation_dict)
 
         if self.use_cuda:
             log.info("Using CUDA; {} devices.".format(torch.cuda.device_count()))
             if torch.cuda.device_count() > 1:
                 seg_model = nn.DataParallel(seg_model)
-                aug_model = nn.DataParallel(aug_model)
+                #aug_model = nn.DataParallel(aug_model)
             seg_model = seg_model.to(self.device)
-            aug_model = aug_model.to(self.device)
+            #aug_model = aug_model.to(self.device)
 
-        return seg_model, aug_model
+        return seg_model #, aug_model
 
-    def init_optim(self, lr=8e-3, momentum=.99):
-        #return SGD(self.seg_model.parameters(), lr=lr, 
-        #           momentum=momentum, weight_decay=1e-4)
-        return Adam(self.seg_model.parameters())
+    def init_optim(self, lr=3e-2, momentum=.99):
+        return SGD(self.seg_model.parameters(), lr=lr, 
+                   momentum=momentum, weight_decay=1e-4)
+        #return Adam(self.seg_model.parameters(), lr=lr)
 
     def init_loss_func(self):
-        def loss_func(pred_g, label_g, epsilon=1):
+        def dice_loss_func(pred_g, label_g, epsilon=1):
+            d_loss = dice_loss(torch.argmax(pred_g, dim=1, keepdim=True).float(),
+                               label_g)
+            return d_loss
+        def ce_loss_func(pred_g, label_g, epsilon=1):
             ce_loss = cross_entropy_loss(pred_g,
                                          torch.squeeze(label_g, dim=1).long())
-            d_loss = dice_loss(torch.argmax(pred_g, dim=1, keepdim=True),
-                               label_g)
-            return ce_loss, d_loss
-        return loss_func 
+            return ce_loss
+        return dice_loss_func, ce_loss_func
 
     def init_dl(self):
-        splitter = partial(list_stride_splitter, val_stride=10)
+        splitter = partial(list_stride_splitter, val_stride=5)
 
         train_ds = TrainingCovid2dSegmentationDataset(
             steps_per_epoch=self.cli_args.steps_per_epoch,
@@ -292,7 +297,8 @@ class CovidSegmentationTrainingApp:
 
         pred_g = self.sliding_window(ct_g, self.seg_model)
 
-        ce_loss, dice_loss = self.loss_func(pred_g, mask_g)
+        dice_loss = self.dice_loss(pred_g, mask_g)
+        ce_loss = self.ce_loss(pred_g, mask_g)
         dice_ce_loss = (ce_loss + dice_loss) * .5
 
         if is_train:
@@ -303,7 +309,8 @@ class CovidSegmentationTrainingApp:
             end_idx = start_idx + batch_size
 
         with torch.no_grad():
-            pred_bool = pred_g > thresh
+            pred_max = torch.argmax(pred_g, dim=1, keepdim=True)
+            pred_bool = pred_max > thresh
             mask_bool = mask_g > thresh
 
             tp = (pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
@@ -322,7 +329,7 @@ class CovidSegmentationTrainingApp:
         loss = dice_ce_loss.mean()
         if get_sample:
             return loss, ct_g.detach().cpu(), \
-                mask_g.detach().cpu(), pred_g.detach().cpu()
+                mask_g.detach().cpu(), pred_max.detach().cpu()
         return loss, None, None, None
 
     def init_sliding_window(self):
@@ -351,7 +358,7 @@ class CovidSegmentationTrainingApp:
                     is_train=train, get_sample=(i==len(dl)-1))
                 loss.backward()
                 self.optim.step()
-                #self.scheduler.step()
+                self.scheduler.step()
             else:
                 with torch.no_grad():
                     _, ct_t, mask_t, pred_t = self.batch_loss(
@@ -475,7 +482,6 @@ class CovidSegmentationTrainingApp:
             'epoch': epoch,
             'total_training_samples_count': self.total_training_samples_count,
             'depth': self.cli_args.depth,
-            'pad_type': self.cli_args.pad_type,
             'window': self.cli_args.ct_window
         }
 
@@ -497,7 +503,8 @@ class CovidSegmentationTrainingApp:
         log.info(f"Starting {type(self).__name__}, {self.cli_args}")
         best_score = 0.
         mb = master_bar(range(1, self.cli_args.epochs+1))
-        mb.write(['epoch', 'loss/trn', 'loss/val',
+        mb.write(['epoch', 'loss/trn', 'dice_loss/trn', 'ce_loss/trn', 
+                  'loss/val', 'dice_loss/val', 'ce_loss/val',
                   'metrics_val/miss_rate', 'metrics_val/fp_to_mask_ratio',
                   'pr_val/precision', 'pr_val/recall', 'pr_val/f1_score'], 
                  table=True)
