@@ -37,9 +37,9 @@ class CovidPrepCacheApp:
 
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
-        #width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
-        #ds = PrepcacheCovidDataset(width_irc=width_irc)
-        ds = PrepcacheCovidDataset()
+        width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
+        ds = PrepcacheCovidDataset(width_irc=width_irc)
+        #ds = PrepcacheCovidDataset()
         self.prep_dl = DataLoader(
             ds,
             batch_size=self.cli_args.batch_size,

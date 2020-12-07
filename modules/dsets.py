@@ -18,8 +18,10 @@ from torch.utils.data import Dataset
 from skimage.measure import regionprops
 
 # local imports
-from modules.util.util import window_image 
 from modules.util.logconf import logging
+from modules.util.util import window_image 
+from modules.util.util import find_borders
+from modules.util.gaussian_smoothing import GaussianSmoothing
 
 # Load environment variables to get local datasets path
 load_dotenv()
@@ -48,7 +50,7 @@ class Ct:
         ct = nib.load(ct_paths[0])
         self.ct_t = torch.from_numpy(ct.get_fdata().T).float()
         self.affine = ct.affine
-        self.spacing = ct.header.get_zooms()[::-1]
+        self.spacing_t = torch.tensor(ct.header.get_zooms()[::-1])
 
         if len(ct_paths) > 1:
             assert len(ct_paths) <= 2, repr([uid, ct_paths])
@@ -138,10 +140,64 @@ def get_ct_index_info(uid, width_irc=[7,192,192], to_spacing=[5,1.25,1.25]):
     return int(ct_t.shape[0]), positive_indices
 '''
 
-def get_ct_augmented(augmentation_dict, uid, use_cache=True):
+@raw_cache.memoize(typed=True)
+def get_cropped_ct(uid, width_irc):
     ct = get_ct(uid)
     ct_t = ct.ct_t
     mask_t = ct.mask_t
+    spacing_t = ct.spacing_t
+
+    gaussian_blur = GaussianSmoothing(channels=ct_t.shape[0], 
+                                      kernel_size=3, sigma=3)
+    x = ct_t[None]
+    x_pad = F.pad(x, (1,1,1,1), mode='reflect')
+    x_blur = gaussian_blur(x_pad)
+    x_blur.clamp(-1000,1000)
+    x_blur /= 2000
+    x_blur += .5
+    x_mask = (x_blur > .2).float()
+    x_mask = torch.tensor(ndimage.binary_erosion(
+        x_mask.numpy(), structure=np.ones((1,5,5,5)))).float()
+    thresh_1 = int((x_mask.size()[-2] * x_mask.size()[-1]) * .1)
+    thresh_2 = int((x_mask.size()[-3] * x_mask.size()[-1]) * .1)
+    thresh_3 = int((x_mask.size()[-3] * x_mask.size()[-2]) * .1)
+    lo_i, hi_i = find_borders(torch.squeeze(x_mask.sum(axis=(-2,-1))), thresh=thresh_1)
+    lo_r, hi_r = find_borders(torch.squeeze(x_mask.sum(axis=(-3,-1))), thresh=thresh_2)
+    lo_c, hi_c = find_borders(torch.squeeze(x_mask.sum(axis=(-3,-2))), thresh=thresh_3)
+
+    if hi_i - lo_i < width_irc[0]:
+        lo_i, hi_i = width_correction(hi_i, lo_i, width_irc[0], ct_t.shape[0]-1)
+    if hi_r - lo_r < width_irc[1]:
+        lo_r, hi_r = width_correction(hi_r, lo_r, width_irc[1], ct_t.shape[1]-1)
+    if hi_c - lo_c < width_irc[2]:
+        lo_c, hi_c = width_correction(hi_c, lo_c, width_irc[2], ct_t.shape[2]-1)
+
+    ct_clip = ct_t[lo_i:hi_i,lo_r:hi_r,lo_c:hi_c]
+    mask_clip = mask_t[lo_i:hi_i,lo_r:hi_r,lo_c:hi_c]
+
+    return ct_clip, mask_clip, spacing_t
+
+def width_correction(hi, lo, width, max_index):
+    pad_size = width - (hi - lo)
+    head_pad = pad_size // 2
+    tail_pad = pad_size // 2 if pad_size % 2 == 0 else pad_size // 2 + 1
+    if lo - tail_pad < 0:
+        head_pad += abs(lo-tail_pad)
+    if hi + head_pad > max_index:
+        tail_pad += ((hi + head_pad) - max_index)
+    lo = max(0, lo-tail_pad)
+    hi = min(max_index, hi+head_pad)
+    return lo, hi
+
+
+def get_ct_augmented(augmentation_dict, uid, width_irc, use_cache=True):
+    if use_cache:
+        ct_t, mask_t, spacing_t = get_cropped_ct(uid, width_irc)
+    else:
+        ct = get_ct(uid)
+        ct_t = ct.ct_t
+        mask_t = ct.mask_t
+        spacing_t = ct.spacing_t
     '''
     if use_cache:
         #ct_t, mask_t = get_spaced_ct(uid)
@@ -149,6 +205,7 @@ def get_ct_augmented(augmentation_dict, uid, use_cache=True):
         ct = get_ct(uid)
         ct_t, mask_t = ct.get_spaced_ct(to_spacing=[5,1.25,1.25])
     '''
+
     ct_t, mask_t = ct_t[None,None], mask_t[None,None]
 
     transform_t = torch.eye(4)
@@ -209,7 +266,7 @@ def get_ct_augmented(augmentation_dict, uid, use_cache=True):
     augmented_ct = augmented_ct.squeeze()
     augmented_mask = augmented_mask.squeeze() > .5
 
-    return augmented_ct, augmented_mask 
+    return augmented_ct, augmented_mask, spacing_t
 
 def group_lesions(ct_t, mask_t, num_erosions=0):
     ct_a = ct_t.numpy()
@@ -291,13 +348,13 @@ def get_meta_dict():
     return meta_dict 
 
 def collate_fn(batch):
-    imgs,targets = zip(*batch)
-    return torch.cat(imgs),torch.cat(targets)
+    imgs,targets,spacings = zip(*batch)
+    return torch.cat(imgs),torch.cat(targets),torch.cat(spacings)
 
 class Covid2dSegmentationDataset(Dataset):
 
     def __init__(self, uid=None, is_valid=None, splitter=None, 
-                 width_irc=(7,192,192), window=None):
+                 window=None, steps_per_epoch=None):
 
         if uid:
             self.uid_list = [uid]
@@ -311,14 +368,16 @@ class Covid2dSegmentationDataset(Dataset):
             self.uid_list, _ = splitter(self.uid_list)
 
         self.window = window
-        self.width_irc = width_irc 
+        self.steps_per_epoch = len(self.uid_list) \
+            if steps_per_epoch is None else steps_per_epoch
 
         log.info(f"{type(self).__name__}: " \
                  + "{} mode, ".format({None:'general',True:'validation',False:'training'}[is_valid]) \
-                 + f"{len(self.uid_list)} uid's")
+                 + f"{len(self.uid_list)} uid's, "
+                 + f"{self.steps_per_epoch} steps_per_epoch")
 
     def __len__(self):
-        return len(self.uid_list)
+        return self.steps_per_epoch
 
     def shuffle(self):
         random.shuffle(self.uid_list)
@@ -328,18 +387,17 @@ class Covid2dSegmentationDataset(Dataset):
         #ct_t, mask_t = get_spaced_ct(uid, self.width_irc)
         ct = get_ct(uid)
         ct_t = window_image(ct.ct_t, self.window)
-        return ct_t[None], ct.mask_t[None]
+        return ct_t[None], ct.mask_t[None], ct.spacing_t[None]
 
 class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
 
-    def __init__(self, is_valid=False, steps_per_epoch=160, 
-                 augmentation_dict={}, *args, **kwargs):
-        super().__init__(is_valid=is_valid, *args, **kwargs)
+    def __init__(self, width_irc=(7,192,192), augmentation_dict={}, 
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
-        self.steps_per_epoch = steps_per_epoch
+        self.width_irc = width_irc 
         self.augmentation_dict = augmentation_dict
-        log.info(f"{type(self).__name__}: {self.width_irc} width_irc, "
-                 + f" {self.steps_per_epoch} steps_per_epoch")
+        log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
 
     def __len__(self):
         return self.steps_per_epoch
@@ -352,8 +410,8 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         return self.getitem_cropbox(uid)
 
     def getitem_cropbox(self, uid):
-        aug_ct_t, aug_mask_t = get_ct_augmented(self.augmentation_dict, 
-                                                uid, use_cache=True)
+        aug_ct_t, aug_mask_t, spacing_t = get_ct_augmented(
+            self.augmentation_dict, uid, self.width_irc, use_cache=True)
 
         num_erosions = np.random.choice(2,1)[0]
 
@@ -361,6 +419,51 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
         #center_irc_list = []
         while len(center_irc_list) < 3:
             center_irc = get_random_center(aug_mask_t, 1)
+            center_irc_list.append(center_irc)
+
+        ct_chunks = []
+        mask_chunks = []
+        spacings = []
+        for center_irc in center_irc_list:
+            ct_chunk, mask_chunk = get_chunk(aug_ct_t, 
+                                             aug_mask_t, 
+                                             center_irc,
+                                             self.width_irc)
+            ct_chunk = window_image(ct_chunk, self.window)
+            ct_chunks.append(ct_chunk[None])
+            mask_chunks.append(mask_chunk[None])
+            spacings.append(spacing_t)
+        
+        return torch.stack(ct_chunks), torch.stack(mask_chunks), torch.stack(spacings)
+
+class TrainingV2Covid2dSegmentationDataset(Covid2dSegmentationDataset):
+
+    def __init__(self, width_irc=(7,192,192), augmentation_dict={}, 
+                 *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.width_irc = width_irc 
+        self.augmentation_dict = augmentation_dict
+        log.info(f"{type(self).__name__}: {self.width_irc} width_irc")
+
+    def __len__(self):
+        return self.steps_per_epoch
+
+    def shuffle(self):
+        random.shuffle(self.uid_list)
+
+    def __getitem__(self, idx):
+        uid = self.uid_list[idx % len(self.uid_list)]
+        return self.getitem_cropbox(uid)
+
+    def getitem_cropbox(self, uid):
+        aug_ct_t, aug_mask_t, spacing = get_ct_augmented(
+            self.augmentation_dict, uid, self.width_irc, use_cache=True)
+
+        center_irc_list = []
+        while len(center_irc_list) < 2:
+            label_value = np.random.choice(2,1).item()
+            center_irc = get_random_center(aug_mask_t, label_value)
             center_irc_list.append(center_irc)
 
         ct_chunks = []
@@ -374,13 +477,13 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
             ct_chunks.append(ct_chunk[None])
             mask_chunks.append(mask_chunk[None])
         
-        return torch.stack(ct_chunks), torch.stack(mask_chunks)
+        return torch.stack(ct_chunks), torch.stack(mask_chunks), spacing
 
 class PrepcacheCovidDataset(Dataset):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, width_irc, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        #self.width_irc = width_irc
+        self.width_irc = width_irc
         df_meta = pd.read_feather('metadata/df_meta.fth')
         self.df_meta = df_meta[df_meta.is_valid==False].sort_values(by='uid')
 
@@ -391,6 +494,7 @@ class PrepcacheCovidDataset(Dataset):
 
         uid = self.df_meta.uid.iloc[idx]
         get_ct(uid)
+        get_cropped_ct(uid, self.width_irc)
         '''
         get_spaced_ct(uid, width_irc=self.width_irc, 
                       to_spacing=[5, 1.25, 1.25])

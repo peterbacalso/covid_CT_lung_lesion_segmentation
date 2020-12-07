@@ -1,3 +1,6 @@
+import numpy as np
+from scipy import ndimage
+
 import torch
 import torch.nn.functional as F
 
@@ -31,4 +34,21 @@ def tversky_loss(y_pred, y_true, ndims=4):
 def cross_entropy_loss(y_pred, y_true, ndims=3):
     dim = [-i for i in reversed(range(1, ndims+1))]
     return F.cross_entropy(y_pred, y_true, reduction='none').mean(dim=dim)
+
+
+# source: https://mlnotebook.github.io/post/surface-distance-function/
+def surface_dist(y_pred, y_true, spacing):
+    s_pred = ndimage.binary_erosion(y_pred)
+    s_true = ndimage.binary_erosion(y_true)
+
+    dt_pred = ndimage.distance_transform_edt(~s_pred, spacing)
+    dt_true = ndimage.distance_transform_edt(~s_true, spacing)
+
+    sds = np.concatenate([np.ravel(dt_pred[s_true!=0]), 
+                          np.ravel(dt_true[s_pred!=0])])
+
+    return sds
+
+
+
 
