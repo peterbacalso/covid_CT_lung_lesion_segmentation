@@ -38,17 +38,16 @@ def cross_entropy_loss(y_pred, y_true, ndims=3):
 
 # source: https://mlnotebook.github.io/post/surface-distance-function/
 def surface_dist(y_pred, y_true, spacing):
-    s_pred = ndimage.binary_erosion(y_pred)
-    s_true = ndimage.binary_erosion(y_true)
+    s_pred = ndimage.binary_erosion(y_pred.squeeze())
+    s_true = ndimage.binary_erosion(y_true.squeeze())
 
-    dt_pred = ndimage.distance_transform_edt(~s_pred, spacing)
-    dt_true = ndimage.distance_transform_edt(~s_true, spacing)
+    dt_pred = ndimage.distance_transform_edt(~s_pred, spacing.squeeze())
+    dt_true = ndimage.distance_transform_edt(~s_true, spacing.squeeze())
 
     sds = np.concatenate([np.ravel(dt_pred[s_true!=0]), 
                           np.ravel(dt_true[s_pred!=0])])
 
     return sds
-
 
 
 

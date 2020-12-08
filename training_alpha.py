@@ -154,10 +154,10 @@ class CovidSegmentationTrainingApp:
             nargs='?',
             default=None
         )
-        parser.add_argument('--unfreeze',
-            help='Set flag to not freeze model during transfer learning.',
-            action='store_false',
-            default=True
+        parser.add_argument('--freeze',
+            help='Set flag to freeze model during transfer learning.',
+            action='store_true',
+            default=False
         )
 
         self.cli_args = parser.parse_args(argv)
@@ -218,7 +218,7 @@ class CovidSegmentationTrainingApp:
         if self.cli_args.model_path is not None:
             model_dict = torch.load(self.cli_args.model_path)
             seg_model.load_state_dict(model_dict['model_state'])
-            if self.cli_args.unfreeze == False:
+            if self.cli_args.freeze:
                 for i, top_layer in enumerate(self.seg_model.children()):
                     if i == 1:
                         for j, layer in enumerate(top_layer.children()):
@@ -240,12 +240,21 @@ class CovidSegmentationTrainingApp:
 
     def init_optim(self, lr=1e-1, momentum=.99):
         optim = SGD(self.seg_model.parameters(), lr=lr, 
-                   momentum=momentum, weight_decay=1e-4)
+                    momentum=momentum, weight_decay=1e-4)
         if self.cli_args.model_path is not None:
             model_dict = torch.load(self.cli_args.model_path)
             optim.load_state_dict(model_dict['optimizer_state'])
         return optim
         #return Adam(self.seg_model.parameters(), lr=lr)
+        
+    def init_scheduler(self):
+        scheduler = OneCycleLR(self.optim, max_lr=3e-1,
+                               steps_per_epoch=len(self.train_dl),
+                               epochs=self.cli_args.epochs)
+        if self.cli_args.model_path is not None:
+            model_dict = torch.load(self.cli_args.model_path)
+            scheduler.load_state_dict(model_dict['scheduler_state'])
+        return scheduler
 
     def init_loss_func(self):
         def dice_loss_func(pred_g, label_g, epsilon=1):
@@ -292,16 +301,6 @@ class CovidSegmentationTrainingApp:
 
         return train_dl, valid_dl
 
-    def init_scheduler(self):
-        scheduler = OneCycleLR(self.optim, max_lr=3e-1,
-                          steps_per_epoch=len(self.train_dl),
-                          epochs=self.cli_args.epochs)
-#         if self.cli_args.model_path is not None:
-#             model_dict = torch.load(self.cli_args.model_path)
-#             scheduler.load_state_dict(model_dict['scheduler_state'])
-        return scheduler
-
-
     def batch_loss(self, idx, batch, batch_size, metrics, 
                    is_train=True, thresh=.5, get_sample=False):
         ct_t, mask_t, spacings = batch
@@ -319,20 +318,7 @@ class CovidSegmentationTrainingApp:
 
         dice_loss = self.dice_loss(pred_g, mask_g)
         ce_loss = self.ce_loss(pred_g, mask_g)
-        dice_ce_loss = (dice_loss * .7) + (ce_loss * .3)
-
-        mean_dists = []
-        rms_dists = []
-        haus_dists = []
-        for ct, mask, spacing in zip(ct_t,mask_t,spacings):
-            ct_a = ct.numpy().detach()
-            mask_a = mask.numpy().detach()
-            spacing_a = spacing.numpy().detach()
-            sd = loss_funcs.surface_dist(ct_a, mask_a, spacing_a)
-            mean_dists.append(sd.mean())
-            rms_dists.append(np.sqrt((sd**2).mean())
-            haus_dists.append(sd.max())
-                
+        dice_ce_loss = (dice_loss * .7) + (ce_loss * .3)                
 
         if is_train:
             start_idx = idx * batch_size*3
@@ -345,6 +331,22 @@ class CovidSegmentationTrainingApp:
             pred_max = torch.argmax(pred_g, dim=1, keepdim=True)
             pred_bool = pred_max > thresh
             mask_bool = mask_g > thresh
+            
+            if not is_train:
+                mean_dists = []
+                rms_dists = []
+                haus_dists = []
+                for ct, mask, spacing in zip(ct_t,mask_t,spacings):
+                    ct_a = ct.numpy().detach()
+                    mask_a = mask.numpy().detach()
+                    spacing_a = spacing.numpy().detach()
+                    sd = loss_funcs.surface_dist(ct_a, mask_a, spacing_a)
+                    mean_dists.append(torch.tensor(sd.mean()))
+                    rms_dists.append(torch.tensor(np.sqrt((sd**2).mean())))
+                    haus_dists.append(torch.tensor(sd.max()))
+                metrics[METRICS_MSD_IDX, start_idx:end_idx] = mean_dists
+                metrics[METRICS_RMSD_IDX, start_idx:end_idx] = rms_dists
+                metrics[METRICS_HAUSD_IDX, start_idx:end_idx] = haus_dists
 
             tp = (pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
             fn = (~pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
@@ -356,9 +358,6 @@ class CovidSegmentationTrainingApp:
             metrics[METRICS_FP_IDX, start_idx:end_idx] = fp 
             metrics[METRICS_CE_LOSS_IDX, start_idx:end_idx] = ce_loss
             metrics[METRICS_DICE_LOSS_IDX, start_idx:end_idx] = dice_loss
-            metrics[METRICS_MSD_IDX, start_idx:end_idx] = mean_dists
-            metrics[METRICS_RMSD_IDX, start_idx:end_idx] = rms_dists
-            metrics[METRICS_HAUSD_IDX, start_idx:end_idx] = haus_dists
 
         self.batch_count += 1
 
@@ -420,9 +419,10 @@ class CovidSegmentationTrainingApp:
         metrics_dict[f'dice_loss/{mode_str}'] = metrics_a[METRICS_DICE_LOSS_IDX].mean()
         metrics_dict[f'ce_loss/{mode_str}'] = metrics_a[METRICS_CE_LOSS_IDX].mean()
 
-        metrics_dict[f'mean_surface_dist/{mode_str}'] = metrics_a[METRICS_MSD_IDX].mean()
-        metrics_dict[f'root_mean_surface_dist/{mode_str}'] = metrics_a[METRICS_RMSD_IDX].mean()
-        metrics_dict[f'hausdorff_dist/{mode_str}'] = metrics_a[METRICS_HAUSD_IDX].mean()
+        if mode_str == 'val':
+            metrics_dict[f'surface_dist_{mode_str}/mean'] = metrics_a[METRICS_MSD_IDX].mean()
+            metrics_dict[f'surface_dist_{mode_str}/root_mean_squared'] = metrics_a[METRICS_RMSD_IDX].mean()
+            metrics_dict[f'surface_dist_{mode_str}/hausdorff'] = metrics_a[METRICS_HAUSD_IDX].mean()
 
         metrics_dict[f'metrics_{mode_str}/miss_rate'] = \
             sum_a[METRICS_FN_IDX] / (mask_voxel_count or 1)
@@ -459,6 +459,9 @@ class CovidSegmentationTrainingApp:
                       + "{pr_val/f1_score:.4f} f1 score "
                       + "{metrics_val/miss_rate:.4f} miss rate "
                       + "{metrics_val/fp_to_mask_ratio:.4f} fp to label ratio"
+                      + "{surface_dist_val/mean:.4f} mean distance"
+                      + "{surface_dist_val/root_mean_squared:.4f} root mean squared distance"
+                      + "{surface_dist_val/hausdorff:.4f} hausdorff distance"
             ).format(epoch, mode_str, **metrics_dict))
 
         wandb.log(metrics_dict, step=self.total_training_samples_count)
@@ -533,6 +536,7 @@ class CovidSegmentationTrainingApp:
         if is_best:
             best_path = Path(f'saved-models/{self.time_str}.best.state')
             shutil.copy(file_path, best_path)
+            wandb.save(best_path)
             log.info(f'Saved model params to {best_path}')
 
         # output sha1 of model saved 
@@ -548,7 +552,9 @@ class CovidSegmentationTrainingApp:
         mb.write(['epoch', 'loss/trn', 'dice_loss/trn', 'ce_loss/trn', 
                   'loss/val', 'dice_loss/val', 'ce_loss/val',
                   'metrics_val/miss_rate', 'metrics_val/fp_to_mask_ratio',
-                  'pr_val/precision', 'pr_val/recall', 'pr_val/f1_score'], 
+                  'pr_val/precision', 'pr_val/recall', 'pr_val/f1_score',
+                  'surface_dist_val/mean', 'surface_dist_val/root_mean_squared',
+                  'surface_dist_val/hausdorff'], 
                  table=True)
         for epoch in mb:
             trn_metrics, ct_t_trn, mask_t_trn, pred_t_trn = self.one_epoch(
@@ -580,11 +586,13 @@ class CovidSegmentationTrainingApp:
                     "{:.4f}".format(val_metrics_dict['metrics_val/fp_to_mask_ratio']),
                     "{:.4f}".format(val_metrics_dict['pr_val/precision']),
                     "{:.4f}".format(val_metrics_dict['pr_val/recall']),
-                    "{:.4f}".format(val_metrics_dict['pr_val/f1_score'])
+                    "{:.4f}".format(val_metrics_dict['pr_val/f1_score']),
+                    "{:.4f}".format(val_metrics_dict['surface_dist_val/mean']),
+                    "{:.4f}".format(val_metrics_dict['surface_dist_val/root_mean_squared']),
+                    "{:.4f}".format(val_metrics_dict['surface_dist_val/hausdorff'])
                 ], table=True)
 
 
 if __name__=='__main__':
     CovidSegmentationTrainingApp().main()
-
 
