@@ -202,9 +202,6 @@ class CovidSegmentationTrainingApp:
         self.total_training_samples_count = 0
         self.batch_count = 0
 
-        if self.cli_args.model_path is not None:
-            self.resume_training(self.cli_args.unfreeze)
-
         self.optim = self.init_optim()
         self.scheduler = self.init_scheduler()
 
@@ -215,6 +212,17 @@ class CovidSegmentationTrainingApp:
             depth=self.cli_args.depth,
             wf=4,
             padding=True)
+        
+        if self.cli_args.model_path is not None:
+            model_dict = torch.load(self.cli_args.model_path)
+            seg_model.load_state_dict(model_dict['model_state'])
+            if self.cli_args.unfreeze == False:
+                for i, top_layer in enumerate(self.seg_model.children()):
+                    if i == 1:
+                        for j, layer in enumerate(top_layer.children()):
+                            if j < 2:
+                                for param in layer.parameters():
+                                    param.requires_grad = False
 
         #aug_model = SegmentationAugmentation(**self.augmentation_dict)
 
@@ -229,8 +237,12 @@ class CovidSegmentationTrainingApp:
         return seg_model #, aug_model
 
     def init_optim(self, lr=1e-1, momentum=.99):
-        return SGD(self.seg_model.parameters(), lr=lr, 
+        optim = SGD(self.seg_model.parameters(), lr=lr, 
                    momentum=momentum, weight_decay=1e-4)
+        if self.cli_args.model_path is not None:
+            model_dict = torch.load(self.cli_args.model_path)
+            optim.load_state_dict(model_dict['optimizer_state'])
+        return optim
         #return Adam(self.seg_model.parameters(), lr=lr)
 
     def init_loss_func(self):
@@ -245,7 +257,7 @@ class CovidSegmentationTrainingApp:
         return dice_loss_func, ce_loss_func
 
     def init_dl(self):
-        splitter = partial(list_stride_splitter, val_stride=5)
+        splitter = partial(list_stride_splitter, val_stride=10)
 
         train_ds = TrainingV2Covid2dSegmentationDataset(
             steps_per_epoch=self.cli_args.steps_per_epoch,
@@ -279,22 +291,13 @@ class CovidSegmentationTrainingApp:
         return train_dl, valid_dl
 
     def init_scheduler(self):
-        return OneCycleLR(self.optim, max_lr=3e-1,
+        scheduler = OneCycleLR(self.optim, max_lr=3e-1,
                           steps_per_epoch=len(self.train_dl),
                           epochs=self.cli_args.epochs)
-
-    def resume_training(self, freeze=True):
-        model_dict = torch.load(self.cli_args.model_path)
-        self.seg_model.load_state_dict(model_dict['model_state'])
-        self.optim.load_state_dict(model_dict['optimizer_state'])
-        #self.scheduler.load_state_dict(model_dict['scheduler_state'])
-        if freeze:
-            for i, top_layer in enumerate(self.seg_model.children()):
-                if i == 1:
-                    for j, layer in enumerate(top_layer.children()):
-                        if j < 2:
-                            for param in layer.parameters():
-                                param.requires_grad = False
+#         if self.cli_args.model_path is not None:
+#             model_dict = torch.load(self.cli_args.model_path)
+#             scheduler.load_state_dict(model_dict['scheduler_state'])
+        return scheduler
 
 
     def batch_loss(self, idx, batch, batch_size, metrics, 
@@ -501,7 +504,7 @@ class CovidSegmentationTrainingApp:
         state = {
             'sys_argv': sys.argv,
             'time': str(datetime.datetime.now()),
-            'model_state': model.state_dict(),
+            'model_state': model.state_dict(), #if torch.cuda.device_count() == 1 else model.module.state_dict(),
             'model_name': type(model).__name__,
             'optimizer_state': self.optim.state_dict(),
             'optimizer_name': type(self.optim).__name__,
