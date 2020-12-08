@@ -1,5 +1,7 @@
+import math
 import torch
 import pickle
+import datetime
 import numpy as np
 
 from collections import namedtuple
@@ -52,6 +54,15 @@ def importstr(module_str, from_=None):
         except:
             raise ImportError('{}.{}'.format(module_str, from_))
     return module
+
+def run_shell_cmd(log, app, *argv):    
+    argv = list(argv)
+    log.info("Running: {}({!r}).main()".format(app, argv))
+    
+    app_cls = importstr(*app.rsplit('.', 1))
+    app_cls(argv).main()
+    
+    log.info("Finished: {}.{!r}.main()".format(app, argv))
 
 def find_borders(mask_list, thresh):
     left, right = 0, len(mask_list)-1

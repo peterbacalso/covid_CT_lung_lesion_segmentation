@@ -21,7 +21,7 @@ from modules.util.logconf import logging
 from modules.model import CovidSegNetWrapper
 from modules.util.util import list_stride_splitter
 from modules.util.loss_funcs import dice_loss, cross_entropy_loss, surface_dist
-from modules.dsets import (TrainingV2Covid2dSegmentationDataset, collate_fn,
+from modules.dsets import (TrainingCovid2dSegmentationDataset, collate_fn,
                           Covid2dSegmentationDataset, get_ct)
 
 log = logging.getLogger(__name__)
@@ -83,6 +83,12 @@ class CovidSegmentationTrainingApp:
             type=int
         )
         parser.add_argument(
+            '--lr',
+            help='Learning rate',
+            default=0.1,
+            type=float
+        )
+        parser.add_argument(
             '--augment-flip',
             help='Augment the training data by randomly flipping the data left-right, up-down, and front-back.',
             action='store_true',
@@ -116,7 +122,7 @@ class CovidSegmentationTrainingApp:
             '--augmented',
             help='Augment the training data.',
             action='store_true',
-            default=False
+            default=True
         )
         parser.add_argument('--width-irc',
             nargs='+',
@@ -125,8 +131,8 @@ class CovidSegmentationTrainingApp:
         )
         parser.add_argument(
             '--ct-window',
-            help='Specify CT window: one of (none, lung, mediastinal, shifted_lung)',
-            default=None,
+            help='Specify CT window: one of (None, lung, mediastinal, shifted_lung)',
+            default='shifted_lung',
             type=str
         )
         parser.add_argument('--model-path',
@@ -199,9 +205,9 @@ class CovidSegmentationTrainingApp:
 
         return seg_model
 
-    def init_optim(self, lr=1e-1, momentum=.99):
-        optim = SGD(self.seg_model.parameters(), lr=lr, 
-                    momentum=momentum, weight_decay=1e-4)
+    def init_optim(self):
+        optim = SGD(self.seg_model.parameters(), lr=self.cli_args.lr, 
+                    momentum=.99, weight_decay=1e-4)
         if self.cli_args.model_path is not None:
             model_dict = torch.load(self.cli_args.model_path)
             optim.load_state_dict(model_dict['optimizer_state'])
@@ -230,7 +236,7 @@ class CovidSegmentationTrainingApp:
     def init_dl(self):
         splitter = partial(list_stride_splitter, val_stride=10)
 
-        train_ds = TrainingV2Covid2dSegmentationDataset(
+        train_ds = TrainingCovid2dSegmentationDataset(
             steps_per_epoch=self.cli_args.steps_per_epoch,
             window=self.cli_args.ct_window,
             is_valid=False,

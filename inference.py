@@ -12,7 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 # local imports
-from modules.model import UNet3dWrapper, CovidSegNetWrapper
+from modules.model import CovidSegNetWrapper
 from modules.util.logconf import logging
 from modules.dsets import Covid2dSegmentationDataset, get_ct
 
@@ -62,7 +62,7 @@ class CovidInferenceApp:
         parser.add_argument('--width-irc',
             nargs='+',
             help='Pass 3 values: Index, Row, Column',
-            default=[12,192,192]
+            default=[16,128,128]
         )
 
         self.cli_args = parser.parse_args(sys_argv)
@@ -84,18 +84,6 @@ class CovidInferenceApp:
         model_dict = torch.load(self.cli_args.model_path)
 
         self.window = model_dict['window']
-        
-        '''
-        model = UNet3dWrapper(
-            in_channels=1,
-            n_classes=1,
-            depth=model_dict['depth'],
-            wf=4,
-            padding=True,
-            pad_type=model_dict['pad_type'],
-            batch_norm=True,
-            up_mode='upconv')
-        '''
 
         model = CovidSegNetWrapper(
             in_channels=1,
@@ -124,7 +112,6 @@ class CovidInferenceApp:
         ds = Covid2dSegmentationDataset(
             uid=uid,
             window=self.window)
-            #width_irc=self.width_irc)
         dl = DataLoader(
             ds,
             batch_size=self.cli_args.batch_size * (torch.cuda.device_count() \

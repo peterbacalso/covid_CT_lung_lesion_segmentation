@@ -1,7 +1,9 @@
 import sys
 import argparse
+import pandas as pd
 
 from tqdm import tqdm
+from pathlib import Path
 from torch.utils.data import DataLoader
 
 from modules.dsets import PrepcacheCovidDataset
@@ -9,6 +11,8 @@ from modules.util.logconf import logging
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
+
+Path.ls = lambda x: [o.name for o in x.iterdir()]
 
 class CovidPrepCacheApp:
 
@@ -19,7 +23,7 @@ class CovidPrepCacheApp:
         parser = argparse.ArgumentParser()
         parser.add_argument('--batch-size',
             help='Batch size to use for training',
-            default=200,
+            default=20,
             type=int,
         )
         parser.add_argument('--num-workers',
@@ -30,16 +34,34 @@ class CovidPrepCacheApp:
         parser.add_argument('--width-irc',
             nargs='+',
             help='Pass 3 values: Index, Row, Column',
-            default=[12,192,192]
+            default=[16,128,128]
+        )
+        parser.add_argument('--data-path',
+            help="Path to the data to train",
+            nargs='?',
+            required=True
         )
 
         self.cli_args = parser.parse_args(sys_argv)
+        
+        if self.cli_args.data_path is not None:
+            data_path = Path(self.cli_args.data_path)
+            ct_list = data_path.ls()
+            file_names = [ct[:23] if len(ct) > 31 else ct[:21] for ct in ct_list if 'seg' not in ct]
+            uid_list = [ct[18:23] if len(ct) > 22 else ct[18:21] for ct in file_names]
+            fnames = pd.Series(file_names)
+            ct_fnames = list((data_path/fnames).astype(str) + '_ct.nii.gz')
+            mask_fnames = list((data_path/fnames).astype(str) + '_seg.nii.gz')
+            assert len(uid_list) == len(ct_fnames) == len(mask_fnames), repr([len(uid_list), len(ct_fnames), len(mask_fnames)])
+            df_meta = pd.DataFrame({'uid': uid_list,
+                                    'ct_fname': ct_fnames,
+                                    'mask_fname': mask_fnames})
+            df_meta.to_feather('metadata/df_meta.fth')
 
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))
         width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
         ds = PrepcacheCovidDataset(width_irc=width_irc)
-        #ds = PrepcacheCovidDataset()
         self.prep_dl = DataLoader(
             ds,
             batch_size=self.cli_args.batch_size,
