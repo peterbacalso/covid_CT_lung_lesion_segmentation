@@ -11,6 +11,9 @@ cache/
 experiments/
 experiments*
 metadata/
+modules/util/augmentation.py
+modules/util/unet.py
+modules/util/unet3d.py
 
 #
 #
