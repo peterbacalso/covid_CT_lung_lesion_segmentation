@@ -206,7 +206,7 @@ def get_ct_augmented(augmentation_dict, uid, width_irc, use_cache=True):
         ct_t, mask_t = ct.get_spaced_ct(to_spacing=[5,1.25,1.25])
     '''
 
-    ct_t, mask_t = ct_t[None,None], mask_t[None,None]
+    ct_t, mask_t, spacing_t = ct_t[None,None], mask_t[None,None], spacing_t[None]
 
     transform_t = torch.eye(4)
     
@@ -432,7 +432,7 @@ class TrainingCovid2dSegmentationDataset(Covid2dSegmentationDataset):
             ct_chunk = window_image(ct_chunk, self.window)
             ct_chunks.append(ct_chunk[None])
             mask_chunks.append(mask_chunk[None])
-            spacings.append(spacing_t)
+            spacings.append(spacing_t[None])
         
         return torch.stack(ct_chunks), torch.stack(mask_chunks), torch.stack(spacings)
 
@@ -457,7 +457,7 @@ class TrainingV2Covid2dSegmentationDataset(Covid2dSegmentationDataset):
         return self.getitem_cropbox(uid)
 
     def getitem_cropbox(self, uid):
-        aug_ct_t, aug_mask_t, spacing = get_ct_augmented(
+        aug_ct_t, aug_mask_t, spacing_t = get_ct_augmented(
             self.augmentation_dict, uid, self.width_irc, use_cache=True)
 
         center_irc_list = []
@@ -468,6 +468,7 @@ class TrainingV2Covid2dSegmentationDataset(Covid2dSegmentationDataset):
 
         ct_chunks = []
         mask_chunks = []
+        spacings = []
         for center_irc in center_irc_list:
             ct_chunk, mask_chunk = get_chunk(aug_ct_t, 
                                              aug_mask_t, 
@@ -476,8 +477,9 @@ class TrainingV2Covid2dSegmentationDataset(Covid2dSegmentationDataset):
             ct_chunk = window_image(ct_chunk, self.window)
             ct_chunks.append(ct_chunk[None])
             mask_chunks.append(mask_chunk[None])
+            spacings.append(spacing_t[None])
         
-        return torch.stack(ct_chunks), torch.stack(mask_chunks), spacing
+        return torch.stack(ct_chunks), torch.stack(mask_chunks), torch.stack(spacings)
 
 class PrepcacheCovidDataset(Dataset):
     def __init__(self, width_irc, *args, **kwargs):
