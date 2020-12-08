@@ -461,7 +461,7 @@ class TrainingV2Covid2dSegmentationDataset(Covid2dSegmentationDataset):
             self.augmentation_dict, uid, self.width_irc, use_cache=True)
 
         center_irc_list = []
-        while len(center_irc_list) < 2:
+        while len(center_irc_list) < 3:
             label_value = np.random.choice(2,1).item()
             center_irc = get_random_center(aug_mask_t, label_value)
             center_irc_list.append(center_irc)

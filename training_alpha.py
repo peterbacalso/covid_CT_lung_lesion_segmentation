@@ -314,8 +314,8 @@ class CovidSegmentationTrainingApp:
         '''
 
         if is_train:
-            start_idx = idx * batch_size*2
-            end_idx = start_idx + batch_size*2
+            start_idx = idx * batch_size*3
+            end_idx = start_idx + batch_size*3
         else:
             start_idx = idx * batch_size
             end_idx = start_idx + batch_size
@@ -356,7 +356,7 @@ class CovidSegmentationTrainingApp:
             self.seg_model.train()
             dl.dataset.shuffle()
             self.total_training_samples_count += len(dl.dataset)
-            metrics = torch.zeros(METRICS_SIZE, len(dl.dataset)*2, device=self.device)
+            metrics = torch.zeros(METRICS_SIZE, len(dl.dataset)*3, device=self.device)
         else:
             self.seg_model.eval()
             metrics = torch.zeros(METRICS_SIZE, len(dl.dataset), device=self.device)
@@ -492,6 +492,8 @@ class CovidSegmentationTrainingApp:
             'model_name': type(model).__name__,
             'optimizer_state': self.optim.state_dict(),
             'optimizer_name': type(self.optim).__name__,
+            'scheduler_state': self.scheduler.state_dict(),
+            'scheduler_name': type(self.scheduler).__name__,
             'epoch': epoch,
             'total_training_samples_count': self.total_training_samples_count,
             'depth': self.cli_args.depth,

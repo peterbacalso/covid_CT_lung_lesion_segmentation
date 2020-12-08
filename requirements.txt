@@ -93,8 +93,6 @@ MarkupSafe==1.1.1
 matplotlib==3.2.1
 MechanicalSoup==0.8.0
 mistune==0.8.4
-# Editable install with no version control (monai==0.3.0)
--e /home/peter/programming/venvs/ml/lib/python3.8/site-packages
 msrest==0.6.19
 msrestazure==0.6.4
 multidict==4.7.6

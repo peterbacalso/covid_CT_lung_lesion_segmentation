@@ -12,7 +12,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 # local imports
-from modules.model import UNet3dWrapper
+from modules.model import UNet3dWrapper, CovidSegNetWrapper
 from modules.util.logconf import logging
 from modules.dsets import Covid2dSegmentationDataset, get_ct
 
@@ -30,7 +30,7 @@ class CovidInferenceApp:
 
         parser = argparse.ArgumentParser()
         parser.add_argument('--batch-size',
-            help='Batch size to use for training',
+            help='Batch size to use for inference',
             default=1,
             type=int,
         )
@@ -85,6 +85,7 @@ class CovidInferenceApp:
 
         self.window = model_dict['window']
         
+        '''
         model = UNet3dWrapper(
             in_channels=1,
             n_classes=1,
@@ -94,6 +95,14 @@ class CovidInferenceApp:
             pad_type=model_dict['pad_type'],
             batch_norm=True,
             up_mode='upconv')
+        '''
+
+        model = CovidSegNetWrapper(
+            in_channels=1,
+            n_classes=2,
+            depth=model_dict['depth'],
+            wf=4,
+            padding=True)
 
         model.load_state_dict(model_dict['model_state'])
         model.eval()
@@ -109,13 +118,13 @@ class CovidInferenceApp:
         roi_size = (self.width_irc[0], self.width_irc[1], self.width_irc[2])
         return SlidingWindowInferer(roi_size=roi_size,
                                     sw_batch_size=1,
-                                    overlap=.5)
+                                    overlap=.2)
 
     def init_dl(self, uid):
         ds = Covid2dSegmentationDataset(
             uid=uid,
-            window=self.window, 
-            width_irc=self.width_irc)
+            window=self.window)
+            #width_irc=self.width_irc)
         dl = DataLoader(
             ds,
             batch_size=self.cli_args.batch_size * (torch.cuda.device_count() \
@@ -127,7 +136,7 @@ class CovidInferenceApp:
     def segment_ct(self, ct, uid):
         with torch.no_grad():
             dl = self.init_dl(uid)
-            for ct_t, _ in dl:
+            for ct_t,_,__ in dl:
                 log.info(f"input shape {ct_t.squeeze().shape}")
                 ct_g = ct_t.to(self.device)
                 preds = self.sliding_window(ct_g, self.model)
