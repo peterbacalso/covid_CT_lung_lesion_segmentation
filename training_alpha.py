@@ -536,7 +536,7 @@ class CovidSegmentationTrainingApp:
         if is_best:
             best_path = Path(f'saved-models/{self.time_str}.best.state')
             shutil.copy(file_path, best_path)
-            wandb.save(best_path)
+            wandb.save(str(best_path))
             log.info(f'Saved model params to {best_path}')
 
         # output sha1 of model saved 
