@@ -9,6 +9,8 @@ submission/
 submission.zip
 cache/
 experiments/
+experiments*
+metadata/
 
 #
 #
