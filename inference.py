@@ -140,10 +140,12 @@ class CovidInferenceApp:
                 log.info(f"input shape {ct_t.squeeze().shape}")
                 ct_g = ct_t.to(self.device)
                 preds = self.sliding_window(ct_g, self.model)
+                preds = torch.argmax(preds, dim=1, keepdim=True).float()
                 n = 1.0
                 for dims in [[-2], [-1]]:
                     flip_ct_g = torch.flip(ct_g, dims=dims)
                     flip_pred = self.sliding_window(flip_ct_g, self.model)
+                    flip_pred = torch.argmax(flip_pred, dim=1, keepdim=True).float()
                     pred = torch.flip(flip_pred, dims=dims)
                     preds = preds + pred
                     n = n + 1.0
