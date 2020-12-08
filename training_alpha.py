@@ -268,7 +268,7 @@ class CovidSegmentationTrainingApp:
         return dice_loss_func, ce_loss_func
 
     def init_dl(self):
-        splitter = partial(list_stride_splitter, val_stride=5)
+        splitter = partial(list_stride_splitter, val_stride=10)
 
         train_ds = TrainingV2Covid2dSegmentationDataset(
             steps_per_epoch=self.cli_args.steps_per_epoch,
@@ -518,7 +518,7 @@ class CovidSegmentationTrainingApp:
         state = {
             'sys_argv': sys.argv,
             'time': str(datetime.datetime.now()),
-            'model_state': model.state_dict(),
+            'model_state': model.state_dict(), #if torch.cuda.device_count() == 1 else model.module.state_dict(),
             'model_name': type(model).__name__,
             'optimizer_state': self.optim.state_dict(),
             'optimizer_name': type(self.optim).__name__,
