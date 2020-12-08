@@ -29,14 +29,16 @@ from modules.dsets import (TrainingV2Covid2dSegmentationDataset, collate_fn,
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-METRICS_SIZE = 6
+METRICS_SIZE = 9
 METRICS_LOSS_IDX = 0
 METRICS_TP_IDX = 1
 METRICS_FN_IDX = 2
 METRICS_FP_IDX = 3
 METRICS_CE_LOSS_IDX = 4
 METRICS_DICE_LOSS_IDX = 5
-#METRICS_SURFD_IDX = 6
+METRICS_MSD_IDX = 6
+METRICS_RMSD_IDX = 7
+METRICS_HAUSD_IDX = 8
 
 class CovidSegmentationTrainingApp:
 
@@ -319,15 +321,18 @@ class CovidSegmentationTrainingApp:
         ce_loss = self.ce_loss(pred_g, mask_g)
         dice_ce_loss = (dice_loss * .7) + (ce_loss * .3)
 
-        '''
-        surface_dists = []
+        mean_dists = []
+        rms_dists = []
+        haus_dists = []
         for ct, mask, spacing in zip(ct_t,mask_t,spacings):
             ct_a = ct.numpy().detach()
             mask_a = mask.numpy().detach()
             spacing_a = spacing.numpy().detach()
-            surface_dists.append(
-                loss_funcs.surface_dist(ct_a, mask_a, spacing_a))
-        '''
+            sd = loss_funcs.surface_dist(ct_a, mask_a, spacing_a)
+            mean_dists.append(sd.mean())
+            rms_dists.append(np.sqrt((sd**2).mean())
+            haus_dists.append(sd.max())
+                
 
         if is_train:
             start_idx = idx * batch_size*3
@@ -351,7 +356,9 @@ class CovidSegmentationTrainingApp:
             metrics[METRICS_FP_IDX, start_idx:end_idx] = fp 
             metrics[METRICS_CE_LOSS_IDX, start_idx:end_idx] = ce_loss
             metrics[METRICS_DICE_LOSS_IDX, start_idx:end_idx] = dice_loss
-            #metrics[METRICS_SURFD_IDX, start_idx:end_idx] =  surface_dists
+            metrics[METRICS_MSD_IDX, start_idx:end_idx] = mean_dists
+            metrics[METRICS_RMSD_IDX, start_idx:end_idx] = rms_dists
+            metrics[METRICS_HAUSD_IDX, start_idx:end_idx] = haus_dists
 
         self.batch_count += 1
 
@@ -412,6 +419,10 @@ class CovidSegmentationTrainingApp:
         metrics_dict[f'loss/{mode_str}'] = metrics_a[METRICS_LOSS_IDX].mean()
         metrics_dict[f'dice_loss/{mode_str}'] = metrics_a[METRICS_DICE_LOSS_IDX].mean()
         metrics_dict[f'ce_loss/{mode_str}'] = metrics_a[METRICS_CE_LOSS_IDX].mean()
+
+        metrics_dict[f'mean_surface_dist/{mode_str}'] = metrics_a[METRICS_MSD_IDX].mean()
+        metrics_dict[f'root_mean_surface_dist/{mode_str}'] = metrics_a[METRICS_RMSD_IDX].mean()
+        metrics_dict[f'hausdorff_dist/{mode_str}'] = metrics_a[METRICS_HAUSD_IDX].mean()
 
         metrics_dict[f'metrics_{mode_str}/miss_rate'] = \
             sum_a[METRICS_FN_IDX] / (mask_voxel_count or 1)
