@@ -22,7 +22,7 @@ from modules.util.logconf import logging
 from modules.model import CovidSegNetWrapper
 from modules.util.util import list_stride_splitter
 from modules.util.augmentation import SegmentationAugmentation
-from modules.util.loss_funcs import dice_loss, cross_entropy_loss
+from modules.util.loss_funcs import dice_loss, cross_entropy_loss, surface_dist
 from modules.dsets import (TrainingV2Covid2dSegmentationDataset, collate_fn,
                           Covid2dSegmentationDataset, get_ct)
 
@@ -336,17 +336,17 @@ class CovidSegmentationTrainingApp:
                 mean_dists = []
                 rms_dists = []
                 haus_dists = []
-                for ct, mask, spacing in zip(ct_t,mask_t,spacings):
-                    ct_a = ct.numpy().detach()
-                    mask_a = mask.numpy().detach()
-                    spacing_a = spacing.numpy().detach()
-                    sd = loss_funcs.surface_dist(ct_a, mask_a, spacing_a)
+                for pred, mask, spacing in zip(pred_max,mask_g,spacings):
+                    pred_a = pred.cpu().detach().numpy()
+                    mask_a = mask.cpu().detach().numpy()
+                    spacing_a = spacing.cpu().detach().numpy()
+                    sd = surface_dist(pred_a, mask_a, spacing_a)
                     mean_dists.append(torch.tensor(sd.mean()))
                     rms_dists.append(torch.tensor(np.sqrt((sd**2).mean())))
                     haus_dists.append(torch.tensor(sd.max()))
-                metrics[METRICS_MSD_IDX, start_idx:end_idx] = mean_dists
-                metrics[METRICS_RMSD_IDX, start_idx:end_idx] = rms_dists
-                metrics[METRICS_HAUSD_IDX, start_idx:end_idx] = haus_dists
+                metrics[METRICS_MSD_IDX, start_idx:end_idx] = torch.tensor(mean_dists)
+                metrics[METRICS_RMSD_IDX, start_idx:end_idx] = torch.tensor(rms_dists)
+                metrics[METRICS_HAUSD_IDX, start_idx:end_idx] = torch.tensor(haus_dists)
 
             tp = (pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
             fn = (~pred_bool * mask_bool).sum(dim=[-4,-3,-2,-1])
