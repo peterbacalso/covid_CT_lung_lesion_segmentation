@@ -152,6 +152,11 @@ class CovidSegmentationTrainingApp:
             nargs='?',
             default=None
         )
+        parser.add_argument('--unfreeze',
+            help='Set flag to not freeze model during transfer learning.',
+            action='store_false',
+            default=True
+        )
 
         self.cli_args = parser.parse_args(argv)
         self.time_str = datetime.datetime.now().strftime('%Y-%m-%d_%H.%M.%S')
@@ -198,7 +203,7 @@ class CovidSegmentationTrainingApp:
         self.batch_count = 0
 
         if self.cli_args.model_path is not None:
-            self.resume_training()
+            self.resume_training(self.cli_args.unfreeze)
 
         self.optim = self.init_optim()
         self.scheduler = self.init_scheduler()
@@ -278,10 +283,18 @@ class CovidSegmentationTrainingApp:
                           steps_per_epoch=len(self.train_dl),
                           epochs=self.cli_args.epochs)
 
-    def resume_training(self):
+    def resume_training(self, freeze=True):
         model_dict = torch.load(self.cli_args.model_path)
         self.seg_model.load_state_dict(model_dict['model_state'])
-        #self.optim.load_state_dict(model_dict['optimizer_state'])
+        self.optim.load_state_dict(model_dict['optimizer_state'])
+        #self.scheduler.load_state_dict(model_dict['scheduler_state'])
+        if freeze:
+            for i, top_layer in enumerate(self.seg_model.children()):
+                if i == 1:
+                    for j, layer in enumerate(top_layer.children()):
+                        if j < 2:
+                            for param in layer.parameters():
+                                param.requires_grad = False
 
 
     def batch_loss(self, idx, batch, batch_size, metrics, 
