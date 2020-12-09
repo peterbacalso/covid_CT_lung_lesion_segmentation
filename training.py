@@ -473,13 +473,11 @@ class CovidSegmentationTrainingApp:
                   'surface_dist_val/hausdorff'], 
                  table=True)
         for epoch in mb:
-            trn_metrics, ct_t_trn, mask_t_trn, pred_t_trn = self.one_epoch(
-                epoch, dl=self.train_dl, mb=mb)
+            trn_metrics = self.one_epoch(epoch, dl=self.train_dl, mb=mb)
             trn_metrics_dict = self.log_metrics(epoch, mode_str='trn',
                                                   metrics=trn_metrics)
             if epoch == 1 or epoch % self.cli_args.val_cadence== 0:
-                val_metrics, ct_t_val, mask_t_val, pred_t_val = self.one_epoch(
-                    epoch, dl=self.valid_dl, mb=mb, train=False)
+                val_metrics = self.one_epoch(epoch, dl=self.valid_dl, mb=mb, train=False)
                 val_metrics_dict = self.log_metrics(epoch, mode_str='val',
                                                     metrics=val_metrics)
                 best_score = max(best_score, val_metrics_dict['pr_val/f1_score'])

@@ -56,7 +56,14 @@ class CovidPrepCacheApp:
             df_meta = pd.DataFrame({'uid': uid_list,
                                     'ct_fname': ct_fnames,
                                     'mask_fname': mask_fnames})
-            df_meta.to_feather('metadata/df_meta.fth')
+            meta_path = Path(f'metadata/')
+            meta_path.mkdir(parents=True, exist_ok=True)
+            df_meta.to_feather(meta_path/'df_meta.fth')
+            log.info("Creating metadata folder")
+            display(df_meta)
+            with open(".env", "w") as file:
+                file.write(f'datasets_path="{self.cli_args.data_path}"')
+                log.info("Creating data_path environment variable in new .env file")
 
     def main(self):
         log.info("Starting {}, {}".format(type(self).__name__, self.cli_args))

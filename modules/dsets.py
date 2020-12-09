@@ -26,7 +26,7 @@ from modules.util.gaussian_smoothing import GaussianSmoothing
 # Load environment variables to get local datasets path
 load_dotenv()
 data_dir = os.environ.get('datasets_path')
-local_dataset_path = Path(f'{data_dir}/COVID-19-20_v2')
+local_dataset_path = Path(data_dir)
 
 raw_cache = FanoutCache('cache/raw', shards=64, 
                         timeout=1, size_limit=3e11)
@@ -42,6 +42,8 @@ class Ct:
 
         if dataset_path is None:
             ct_paths = sorted(glob.glob(f'{str(local_dataset_path)}/*/*-0{uid}_*.nii.gz'))
+            if len(ct_paths) == 0:
+                ct_paths = sorted(glob.glob(f'{str(local_dataset_path)}/*-0{uid}_*.nii.gz'))
         else:
             ct_paths = sorted(glob.glob(f'{str(dataset_path)}/*-0{uid}_*.nii.gz'))
         assert len(ct_paths) > 0, repr(f'No CT found for given uid {uid}')

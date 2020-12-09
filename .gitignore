@@ -1,19 +1,6 @@
-playground.ipynb
-test_everything.ipynb
-SampleSubmission/
-*.sw*
-data/
 saved-models/
-wandb/
-submission/
-submission.zip
 cache/
-experiments/
-experiments*
 metadata/
-modules/util/augmentation.py
-modules/util/unet.py
-modules/util/unet3d.py
 
 #
 #

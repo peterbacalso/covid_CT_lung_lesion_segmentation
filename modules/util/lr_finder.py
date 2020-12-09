@@ -2,7 +2,6 @@ import sys
 import argparse
 import torch
 import torch.nn.functional as F
-import matplotlib.pyplot as plt
 
 from torch import nn
 from torch.optim import SGD
@@ -32,9 +31,9 @@ optimizer = SGD(model.parameters(), lr=lr, momentum=momentum, weight_decay=weigh
 
 class LearningRateFinder:
     
-    def __init__(self, sys_argv=None):
-        if sys_argv is None:
-            sys_argv = sys.argv[1:]
+    def __init__(self, argv=None):
+        if argv is None:
+            argv = sys.argv[1:]
         parser = argparse.ArgumentParser()
         parser.add_argument('--batch-size',
             help='Batch size to use for the lr finder',
@@ -58,6 +57,7 @@ class LearningRateFinder:
             type=str
         )
         
+        self.cli_args = parser.parse_args(argv)
         self.use_cuda = torch.cuda.is_available()
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
         
@@ -78,7 +78,6 @@ class LearningRateFinder:
             padding=True)
 
         if self.use_cuda:
-            log.info("Using CUDA")
             model = model.to(self.device)
             
         return model
@@ -109,14 +108,13 @@ class LearningRateFinder:
         return train_dl
     
     def init_optim(self, lr=1e-7, momentum=.99, weight_decay=1e-4):
-        optim = SGD(self.seg_model.parameters(), lr=lr, 
+        optim = SGD(self.model.parameters(), lr=lr, 
                     momentum=momentum, weight_decay=weight_decay)
         return optim
     
     def main(self):
         self.lr_finder.range_test(train_loader=self.train_dl, end_lr=10, num_iter=100)
-        self.lr_finder.plot()
-        plt.show()
+        display(self.lr_finder.plot())
         self.lr_finder.reset()
     
         
