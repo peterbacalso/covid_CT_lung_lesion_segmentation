@@ -123,6 +123,7 @@ class CovidInferenceApp:
     def segment_ct(self, ct, uid):
         with torch.no_grad():
             dl = self.init_dl(uid)
+            log.info(f'Running inference for uid: {uid}')
             for ct_t,_,__ in dl:
                 log.info(f"input shape {ct_t.squeeze().shape}")
                 ct_g = ct_t.to(self.device)
@@ -139,7 +140,7 @@ class CovidInferenceApp:
             preds = preds / n
             preds = preds.detach().cpu().squeeze().numpy()
             mask = preds > .5
-            log.info(f"output shape {mask.shape}")
+            log.info(f"output shape: {mask.shape}")
         return mask
 
     def main(self):

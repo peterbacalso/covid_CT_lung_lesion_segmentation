@@ -3,6 +3,10 @@ import torch
 import pickle
 import datetime
 import numpy as np
+import pandas as pd
+
+from pathlib import Path
+Path.ls = lambda x: [o.name for o in x.iterdir()]
 
 from collections import namedtuple
 
@@ -76,5 +80,23 @@ def find_borders(mask_list, thresh):
         if left == right:
             break
     return left, right
+
+def get_best_model(model_folder):
+    saved_models = Path(model_folder)
+    dates, hours, mins, secs, fnames = [], [], [], [], []
+    for fname in saved_models.ls():
+        if 'best' in fname:
+            datetime, _ = fname.split('best')
+            date, time = datetime.split('_')
+            hh, mm, ss, _ = time.split('.')
+            dates.append(date)
+            hours.append(hh)
+            mins.append(mm)
+            secs.append(ss)
+            fnames.append(fname)
+    dates, hours, mins, secs
+    df_time = pd.DataFrame({'date': dates,'hour': hours,'min': mins, 'sec': secs, 'fname': fnames})
+    best_model = df_time.sort_values(by=['date', 'hour', 'min', 'sec'], ascending=False)[:1].fname.item()
+    return Path(saved_models/f'{best_model}')
 
 

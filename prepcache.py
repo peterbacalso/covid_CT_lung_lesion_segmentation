@@ -60,7 +60,8 @@ class CovidPrepCacheApp:
             meta_path.mkdir(parents=True, exist_ok=True)
             df_meta.to_feather(meta_path/'df_meta.fth')
             log.info("Creating metadata folder")
-            display(df_meta)
+            with pd.option_context('display.max_rows', 10):
+                display(df_meta)
             with open(".env", "w") as file:
                 file.write(f'datasets_path="{self.cli_args.data_path}"')
                 log.info("Creating data_path environment variable in new .env file")
