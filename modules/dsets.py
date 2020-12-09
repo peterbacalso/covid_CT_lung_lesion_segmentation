@@ -41,11 +41,13 @@ class Ct:
         self.uid = uid
 
         if dataset_path is None:
-            ct_paths = sorted(glob.glob(f'{str(local_dataset_path)}/*/*-0{uid}_*.nii.gz'))
+            ct_paths = sorted(glob.glob(f'{str(local_dataset_path)}/COVID-19-AR-{uid}_*.nii.gz'))
             if len(ct_paths) == 0:
-                ct_paths = sorted(glob.glob(f'{str(local_dataset_path)}/*-0{uid}_*.nii.gz'))
+                ct_paths = sorted(glob.glob(f'{str(local_dataset_path)}/volume-covid19-A-*{uid}_*.nii.gz'))
         else:
-            ct_paths = sorted(glob.glob(f'{str(dataset_path)}/*-0{uid}_*.nii.gz'))
+            ct_paths = sorted(glob.glob(f'{str(dataset_path)}/COVID-19-AR-{uid}_*.nii.gz'))
+            if len(ct_paths) == 0:
+                ct_paths = sorted(glob.glob(f'{str(dataset_path)}/volume-covid19-A-*{uid}_*.nii.gz'))
         assert len(ct_paths) > 0, repr(f'No CT found for given uid {uid}')
         assert 'ct' in ct_paths[0]
 
@@ -56,7 +58,7 @@ class Ct:
 
         if len(ct_paths) > 1:
             assert len(ct_paths) <= 2, repr([uid, ct_paths])
-            assert 'seg' in ct_paths[1]
+            assert 'seg' in ct_paths[1], repr(ct_paths)
 
             seg = nib.load(ct_paths[1])
             self.mask_t = torch.from_numpy(seg.get_fdata().T).float()

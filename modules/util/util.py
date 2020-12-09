@@ -81,22 +81,26 @@ def find_borders(mask_list, thresh):
             break
     return left, right
 
-def get_best_model(model_folder):
+def get_best_model(model_folder, model_name=None):
     saved_models = Path(model_folder)
-    dates, hours, mins, secs, fnames = [], [], [], [], []
-    for fname in saved_models.ls():
-        if 'best' in fname:
-            datetime, _ = fname.split('best')
-            date, time = datetime.split('_')
-            hh, mm, ss, _ = time.split('.')
-            dates.append(date)
-            hours.append(hh)
-            mins.append(mm)
-            secs.append(ss)
-            fnames.append(fname)
-    dates, hours, mins, secs
-    df_time = pd.DataFrame({'date': dates,'hour': hours,'min': mins, 'sec': secs, 'fname': fnames})
-    best_model = df_time.sort_values(by=['date', 'hour', 'min', 'sec'], ascending=False)[:1].fname.item()
-    return Path(saved_models/f'{best_model}')
+    if model_name is None:
+        dates, hours, mins, secs, fnames = [], [], [], [], []
+        for fname in saved_models.ls():
+            if 'best' in fname:
+                datetime, _ = fname.split('best')
+                date, time = datetime.split('_')
+                hh, mm, ss, _ = time.split('.')
+                dates.append(date)
+                hours.append(hh)
+                mins.append(mm)
+                secs.append(ss)
+                fnames.append(fname)
+        dates, hours, mins, secs
+        df_time = pd.DataFrame({'date': dates,'hour': hours,'min': mins, 'sec': secs, 'fname': fnames})
+        best_model = df_time.sort_values(by=['date', 'hour', 'min', 'sec'], ascending=False)[:1].fname.item()
+        best_model_file = Path(saved_models/f'{best_model}')
+    else:
+        best_model_file = Path(saved_models/f'{model_name}')
+    return best_model_file
 
 

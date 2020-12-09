@@ -153,9 +153,18 @@ class CovidInferenceApp:
             uid_set = set(self.cli_args.uid.split(','))
         elif self.cli_args.run_all:
             dataset_path = Path(self.cli_args.data_path)
-            file_list = dataset_path.ls()
-            uid_list = [fname[18:23] if len(fname) > 31 else fname[18:21] \
-                        for fname in file_list]
+            file_list = dataset_path.ls() 
+            uid_list = []
+            for ct in file_list:
+                if 'seg.nii' not in ct:
+                    fname = ct.split('_ct.nii.gz')[0]
+                    if 'volume-covid19-A-' in fname:
+                        uid = fname.split('volume-covid19-A-')[1]
+                        if uid[0] == '0':
+                            uid = uid[1:]
+                    elif 'COVID-19-AR-' in fname:
+                        uid = fname.split('COVID-19-AR-')[1]
+                    uid_list.append(uid)
             uid_set = set(uid_list)
 
         for uid in uid_set:

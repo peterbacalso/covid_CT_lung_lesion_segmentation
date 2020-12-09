@@ -47,8 +47,19 @@ class CovidPrepCacheApp:
         if self.cli_args.data_path is not None:
             data_path = Path(self.cli_args.data_path)
             ct_list = data_path.ls()
-            file_names = [ct[:23] if len(ct) > 31 else ct[:21] for ct in ct_list if 'seg' not in ct]
-            uid_list = [ct[18:23] if len(ct) > 22 else ct[18:21] for ct in file_names]
+
+            file_names = []
+            uid_list = []
+            for ct in ct_list:
+                if 'seg.nii' not in ct:
+                    fname = ct.split('_ct.nii.gz')[0]
+                    if 'volume-covid19-A-' in fname:
+                        uid = fname.split('volume-covid19-A-0')[1]
+                    elif 'COVID-19-AR-' in fname:
+                        uid = fname.split('COVID-19-AR-')[1]
+                    file_names.append(fname)
+                    uid_list.append(uid)
+            
             fnames = pd.Series(file_names)
             ct_fnames = list((data_path/fnames).astype(str) + '_ct.nii.gz')
             mask_fnames = list((data_path/fnames).astype(str) + '_seg.nii.gz')
