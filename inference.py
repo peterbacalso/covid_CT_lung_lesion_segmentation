@@ -12,8 +12,9 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 # local imports
-from modules.model import CovidSegNetWrapper
 from modules.util.logconf import logging
+from modules.util.util import get_best_model
+from modules.model import CovidSegNetWrapper
 from modules.dsets import Covid2dSegmentationDataset, get_ct
 
 log = logging.getLogger(__name__)
@@ -41,8 +42,8 @@ class CovidInferenceApp:
         )
         parser.add_argument('--model-path',
             help="Path to the saved segmentation model",
-            nargs='?',
-            required=True
+            default=None,
+            type=str
         )
         parser.add_argument('--data-path',
             help="Path to the data to infer",
@@ -72,16 +73,18 @@ class CovidInferenceApp:
         self.device = torch.device("cuda" if self.use_cuda else "cpu")
         self.window = None
 
-        if not self.cli_args.model_path:
-            raise Exception("Path to segmentation model should be given")
+        if self.cli_args.model_path is None:
+            self.model_path = get_best_model('saved-models')
+        else:
+            self.model_path = self.cli_args.model_path
 
         self.width_irc = tuple([int(axis) for axis in self.cli_args.width_irc])
         self.model = self.init_model()
         self.sliding_window = self.init_sliding_window()
 
     def init_model(self):
-        log.debug(self.cli_args.model_path)
-        model_dict = torch.load(self.cli_args.model_path)
+        log.debug(self.model_path)
+        model_dict = torch.load(self.model_path)
 
         self.window = model_dict['window']
 

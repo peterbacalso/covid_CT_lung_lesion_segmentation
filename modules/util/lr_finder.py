@@ -118,3 +118,5 @@ class LearningRateFinder:
         self.lr_finder.reset()
     
         
+if __name__ == '__main__':
+    LearningRateFinder().main()
