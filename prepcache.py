@@ -54,7 +54,9 @@ class CovidPrepCacheApp:
                 if 'seg.nii' not in ct:
                     fname = ct.split('_ct.nii.gz')[0]
                     if 'volume-covid19-A-' in fname:
-                        uid = fname.split('volume-covid19-A-0')[1]
+                        uid = fname.split('volume-covid19-A-')[1]
+                        if uid[0] == '0':
+                            uid = uid[1:]
                     elif 'COVID-19-AR-' in fname:
                         uid = fname.split('COVID-19-AR-')[1]
                     file_names.append(fname)
