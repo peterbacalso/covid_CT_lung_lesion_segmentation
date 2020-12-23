@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+#https://arxiv.org/abs/2004.10987
 
 class CovidSegNet(nn.Module):
 
